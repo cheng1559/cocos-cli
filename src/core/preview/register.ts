@@ -43,6 +43,9 @@ export async function registerBrowserPreview(projectPath: string): Promise<void>
     // 注册热重载（浏览器预览监听 browser:reload，脚本/资源变化后自动刷新）
     const { registerLiveReload } = await import('./live-reload');
     await registerLiveReload();
+
+    const { registerProjectWatcher } = await import('./project-watcher');
+    registerProjectWatcher(projectPath);
 }
 
 /**
@@ -58,6 +61,12 @@ export async function disposeBrowserPreview(): Promise<void> {
         unregisterLiveReload();
     } catch (err) {
         console.warn('[LiveReload] unregister failed:', err);
+    }
+    try {
+        const { unregisterProjectWatcher } = await import('./project-watcher');
+        unregisterProjectWatcher();
+    } catch (err) {
+        console.warn('[ProjectWatcher] unregister failed:', err);
     }
     try {
         extensionHost?.dispose();

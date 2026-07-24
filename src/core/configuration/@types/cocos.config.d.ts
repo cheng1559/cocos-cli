@@ -1,6 +1,6 @@
 import { ImportConfiguration } from '../../assets/@types/config-export';
 import { BuildConfiguration } from '../../builder/@types/config-export';
-import { IEngineConfig } from '../../engine/@types/config';
+import { IEngineProjectConfig } from '../../engine/@types/config';
 import { ScriptProjectConfig } from '../../scripting/@types/config-export';
 
 export interface SceneConfiguration {
@@ -13,7 +13,7 @@ export interface COCOS_CONFIG {
     version: string;
     builder: BuildConfiguration;
     import: ImportConfiguration;
-    engine: IEngineConfig;
+    engine: IEngineProjectConfig;
     scene?: SceneConfiguration;
     script: ScriptProjectConfig;
 }
