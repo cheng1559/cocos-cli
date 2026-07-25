@@ -92,7 +92,7 @@ async function generatePreviewSettings(startScene: string): Promise<IPreviewSett
         // 预览模式下注册项目中的全部场景，使运行时 cc.director.loadScene(name)/(uuid) 可加载任意场景，
         // 对齐编辑器预览行为。构建配置里的 scenes 默认只含构建时勾选的子集，会导致脚本里按名
         // loadScene 其它场景时报 "not in the build settings before playing"。
-        const allScenes = assetManager.queryAssetInfos({ ccType: 'cc.SceneAsset' }) || [];
+        const allScenes = queryProjectScenes(assetManager);
         (options as any).scenes = allScenes.map((scene) => ({ url: scene.url, uuid: scene.uuid }));
         result = await getPreviewSettings(options);
     } catch (err) {
@@ -147,7 +147,7 @@ export async function isPreviewSettingsReady(startScene = ''): Promise<boolean> 
 async function resolveDefaultStartScene(): Promise<string> {
     try {
         const { assetManager } = await import('../assets');
-        const scenes = assetManager.queryAssetInfos({ ccType: 'cc.SceneAsset' });
+        const scenes = queryProjectScenes(assetManager);
         if (scenes && scenes.length) {
             return scenes[0].uuid;
         }
@@ -156,6 +156,11 @@ async function resolveDefaultStartScene(): Promise<string> {
         console.warn('[Preview Server] Failed to resolve default start scene:', err);
     }
     return '';
+}
+
+function queryProjectScenes(assetManager: any): any[] {
+    const scenes = assetManager.queryAssetInfos({ ccType: 'cc.SceneAsset' }) || [];
+    return scenes.filter((scene: any) => scene.url?.startsWith('db://assets/'));
 }
 
 /**

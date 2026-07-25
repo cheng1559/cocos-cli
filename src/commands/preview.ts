@@ -17,6 +17,7 @@ export class PreviewCommand extends BaseCommand {
             .option('-c, --build-config <path>', 'Specify build config file path')
             .option('-s, --scene <sceneUrlOrUuid>', 'Start scene (uuid or db:// url); defaults to project start scene')
             .option('--no-open', 'Do not open the preview URL in browser')
+            .option('--no-debug', 'Disable debug mode')
             .option('--build', 'Use the legacy build-based preview (full build then serve) instead of the dynamic serve preview')
             .option('--scene-editor', 'Start the scene editor debug preview instead of the game preview')
             .action(async (options: any) => {
@@ -48,6 +49,7 @@ export class PreviewCommand extends BaseCommand {
                             }
                             buildOptions = readJSONSync(options.buildConfig);
                         }
+                        buildOptions.debug ??= options.debug;
 
                         const platform = options.platform || buildOptions.platform || 'web-desktop';
                         await launcher.startPreview({
@@ -62,6 +64,7 @@ export class PreviewCommand extends BaseCommand {
                             port,
                             scene: options.scene,
                             open: options.open,
+                            debug: options.debug,
                         });
                     }
 

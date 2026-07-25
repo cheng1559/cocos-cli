@@ -4,12 +4,12 @@ import { ProgrammingFacet } from './Facet';
 let programmingFacet: ProgrammingFacet | null = null;
 let createProgrammingFacetPromise: Promise<ProgrammingFacet> | null = null;
 
-export async function createProgrammingFacet(enginePath: string, projectPath: string, features: string[]) {
+export async function createProgrammingFacet(enginePath: string, projectPath: string, features: string[], debug = true) {
     if (!programmingFacet) {
         programmingFacet = await ProgrammingFacet.create(
             {
                 root: enginePath,
-                distRoot: join(enginePath, 'bin', '.cache', 'dev-cli', 'web'),
+                distRoot: join(enginePath, 'bin', '.cache', 'dev-cli', debug ? 'web' : 'web-release'),
                 baseUrl: '/scripting/engine',
                 features,
             },

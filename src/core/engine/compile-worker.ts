@@ -13,6 +13,7 @@ process.on('message', async (message: any) => {
             await compileEngine(enginePath);
             //compile for web
             await compileEngine(enginePath, true);
+            await compileEngine(enginePath, true, false);
 
             // 编译成功后给主进程发送完成消息
             if (process.send) {

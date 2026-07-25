@@ -58,7 +58,7 @@ export default class Launcher {
     /**
      * 导入资源
      */
-    async import() {
+    async import(debug = true) {
         if (this._import) {
             return;
         }
@@ -69,7 +69,7 @@ export default class Launcher {
         await scripting.initialize(this.projectPath, GlobalPaths.enginePath, Engine.getConfig().includeModules);
 
         const { createProgrammingFacet } = await import('./scripting/programming/FacetInstance');
-        await createProgrammingFacet(Engine.getInfo().typescript.path, scripting.projectPath, Engine.getConfig().includeModules);
+        await createProgrammingFacet(Engine.getInfo().typescript.path, scripting.projectPath, Engine.getConfig().includeModules, debug);
 
         // 启动以及初始化资源数据库
         const { initAssetDB, startAssetDB } = await import('./assets');
@@ -138,8 +138,8 @@ export default class Launcher {
      * 启动动态游戏预览（只托管不构建，对齐编辑器浏览器预览）。
      * 与场景编辑器预览的区别：不启动场景进程 / RPC。
      */
-    async startGamePreview(options: { port?: number; scene?: string; open?: boolean } = {}) {
-        await this.import();
+    async startGamePreview(options: { port?: number; scene?: string; open?: boolean; debug?: boolean } = {}) {
+        await this.import(options.debug);
         await startServer(options.port);
 
         // getPreviewSettings 需要 builder 初始化

@@ -31,6 +31,7 @@ if (!utils.hasDevelopmentEnvironment()) return;
 
         // compile for web
         await compileEngine(engine, true);
+        await compileEngine(engine, true, false);
     } catch (error) {
         console.log(error);
     }

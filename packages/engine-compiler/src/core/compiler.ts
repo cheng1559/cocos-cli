@@ -24,21 +24,24 @@ export class EngineCompiler {
     private outDir: string = '';
     private statsQuery: StatsQuery | null = null;
     private isWeb: boolean;
+    private debug: boolean;
 
     private constructor(
         private enginePath: string,
         isWeb: boolean = false,
+        debug: boolean = true,
     ) {
         this.outDir = ps.join(enginePath, 'bin', '.cache', 'dev-cli');
         this.isWeb = isWeb;
+        this.debug = debug;
     }
 
     public getOutDir(): string {
         return this.outDir;
     }
 
-    static create(path: string, isWeb?: boolean) {
-        return new EngineCompiler(path, isWeb);
+    static create(path: string, isWeb?: boolean, debug?: boolean) {
+        return new EngineCompiler(path, isWeb, debug);
     }
 
     async compile(force: boolean = false): Promise<void> {
@@ -97,7 +100,7 @@ export class EngineCompiler {
             platform: 'NODEJS',
             mode: 'EDITOR',
             flags: {
-                DEBUG: true,
+                DEBUG: this.debug,
             },
         };
         if (options?.isWebview) {
@@ -139,7 +142,7 @@ export class EngineCompiler {
         } else {
             const editorFeatures = await this.filterEngineModules(env, allFeatures);
             this.editorFeaturesCache.push(...editorFeatures);
-            const outputDir = options?.isWebview ? ps.join(this.outDir, 'web') : ps.join(this.outDir, 'editor');
+            const outputDir = options?.isWebview ? ps.join(this.outDir, this.debug ? 'web' : 'web-release') : ps.join(this.outDir, 'editor');
 
             return new QuickCompiler({
                 rootDir: this.enginePath,
@@ -225,6 +228,7 @@ export class EngineCompiler {
             // }
             await this.updateAdapter();
             await this.compiler.build();
+            await this.disableWebDebugConstants();
             await this.rebuildImportMaps();
             const versionFile = ps.join(this.outDir, 'VERSION');
             await fsExtra.outputFile(versionFile, VERSION, { encoding: 'utf8' });
@@ -239,9 +243,31 @@ export class EngineCompiler {
         }
     }
 
+    private async disableWebDebugConstants() {
+        if (!this.isWeb || this.debug) {
+            return;
+        }
+
+        const outputDir = ps.join(this.outDir, 'web-release');
+        const files = [
+            ps.join(outputDir, 'transform-cache', 'virtual', 'internal%3Aconstants.js'),
+            ps.join(outputDir, 'bundled', 'index.js'),
+        ];
+        const enabled = `_export("DEBUG", DEBUG = true);\n      tryDefineGlobal('CC_DEBUG', true);`;
+        const disabled = `_export("DEBUG", DEBUG = false);\n      tryDefineGlobal('CC_DEBUG', false);`;
+
+        for (const file of files) {
+            const source = await fsExtra.readFile(file, 'utf8');
+            if (!source.includes(enabled) && !source.includes(disabled)) {
+                throw new Error(`Failed to locate DEBUG constants in ${file}`);
+            }
+            await fsExtra.writeFile(file, source.replace(enabled, disabled));
+        }
+    }
+
     async clear() {
         try {
-            const clearPath = ps.join(this.outDir, this.isWeb ? 'web' : 'editor');
+            const clearPath = ps.join(this.outDir, this.isWeb ? (this.debug ? 'web' : 'web-release') : 'editor');
             await fsExtra.remove(clearPath);
         } catch (error) { }
     }
