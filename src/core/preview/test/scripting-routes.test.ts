@@ -4,6 +4,9 @@ const mockGetConfigPath = jest.fn();
 const mockPathExists = jest.fn();
 const mockReadJSON = jest.fn();
 const mockQueryAssetInfo = jest.fn();
+const mockScripting = {
+    projectPath: '/project',
+};
 
 jest.mock('../../engine', () => ({
     Engine: {
@@ -27,6 +30,11 @@ jest.mock('../../assets', () => ({
     },
 }));
 
+jest.mock('../../scripting', () => ({
+    __esModule: true,
+    default: mockScripting,
+}));
+
 jest.mock('fs-extra', () => ({
     pathExists: mockPathExists,
     readJSON: mockReadJSON,
@@ -35,10 +43,12 @@ jest.mock('fs-extra', () => ({
 }));
 
 import { scriptingRoutes } from '../scripting-routes';
+import { join } from 'path';
 
 describe('preview scripting routes', () => {
     beforeEach(() => {
         jest.clearAllMocks();
+        mockScripting.projectPath = '/project';
         mockGetModules.mockReturnValue(['base', 'custom-pipeline']);
         mockGetGameConfig.mockResolvedValue({
             overrideSettings: {
@@ -50,6 +60,40 @@ describe('preview scripting routes', () => {
         mockGetConfigPath.mockResolvedValue('E:/project/settings/cocos.config.json');
         mockPathExists.mockResolvedValue(true);
         mockQueryAssetInfo.mockReturnValue(null);
+    });
+
+    it('serves userland custom macro module from project temp programming output', async () => {
+        const route = scriptingRoutes.find((item) => item.url === '/userland/macro');
+        const next = jest.fn();
+        const res = {
+            setHeader: jest.fn(),
+            sendFile: jest.fn(),
+        };
+
+        expect(route).toBeDefined();
+
+        await route!.handler({} as any, res as any, next);
+
+        expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'application/javascript; charset=utf-8');
+        expect(res.sendFile).toHaveBeenCalledWith(join(mockScripting.projectPath, 'temp', 'programming', 'custom-macro.js'));
+        expect(next).not.toHaveBeenCalled();
+    });
+
+    it('passes userland custom macro requests through when the generated file is missing', async () => {
+        mockPathExists.mockResolvedValueOnce(false);
+        const route = scriptingRoutes.find((item) => item.url === '/userland/macro');
+        const next = jest.fn();
+        const res = {
+            setHeader: jest.fn(),
+            sendFile: jest.fn(),
+        };
+
+        expect(route).toBeDefined();
+
+        await route!.handler({} as any, res as any, next);
+
+        expect(res.sendFile).not.toHaveBeenCalled();
+        expect(next).toHaveBeenCalledWith();
     });
 
     it('normalizes disk graphics settings when serving engine modules', async () => {
@@ -161,6 +205,49 @@ describe('preview scripting routes', () => {
             'E:/project/library/45/45e7c0c8-2699-4912-b45f-d42bb8384189.json',
             { dotfiles: 'allow' },
         );
+    });
+
+    it('serves explicit asset-library requests for files stored under a uuid directory', async () => {
+        const uuid = '0835f102-5471-47a3-9a76-01c07ac9cdb2';
+        mockQueryAssetInfo.mockReturnValue({
+            library: {
+                'OpenSans-Regular.ttf': 'E:/engine/editor/library/08/0835f102-5471-47a3-9a76-01c07ac9cdb2/OpenSans-Regular.ttf',
+            },
+        });
+        const url = `/scripting/asset-library/${uuid.slice(0, 2)}/${uuid}/OpenSans-Regular.ttf`;
+        const route = scriptingRoutes.find((item) => item.url instanceof RegExp && item.url.test(url));
+        const req = {
+            path: url,
+        };
+        const res = {
+            set: jest.fn(),
+            sendFile: jest.fn(),
+        };
+
+        expect(route).toBeDefined();
+
+        await route!.handler(req as any, res as any, jest.fn());
+
+        expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+        expect(res.sendFile).toHaveBeenCalledWith(
+            'E:/engine/editor/library/08/0835f102-5471-47a3-9a76-01c07ac9cdb2/OpenSans-Regular.ttf',
+            { dotfiles: 'allow' },
+        );
+
+        const otherUuid = 'b5475517-23b9-4873-bc1a-968d96616081';
+        expect((route!.url as RegExp).test(
+            `/scripting/asset-library/${otherUuid.slice(0, 2)}/${otherUuid}/OpenSans-Bold.ttf`,
+        )).toBe(true);
+    });
+
+    it('does not match nested or traversing asset-library file requests', () => {
+        const uuid = '0835f102-5471-47a3-9a76-01c07ac9cdb2';
+        const url = `/scripting/asset-library/${uuid.slice(0, 2)}/${uuid}/OpenSans-Regular.ttf`;
+        const route = scriptingRoutes.find((item) => item.url instanceof RegExp && item.url.test(url));
+
+        expect(route).toBeDefined();
+        expect((route!.url as RegExp).test(`/scripting/asset-library/${uuid.slice(0, 2)}/${uuid}/fonts/OpenSans-Regular.ttf`)).toBe(false);
+        expect((route!.url as RegExp).test(`/scripting/asset-library/${uuid.slice(0, 2)}/${uuid}/../OpenSans-Regular.ttf`)).toBe(false);
     });
 
     it('does not match implicit root library asset requests', () => {

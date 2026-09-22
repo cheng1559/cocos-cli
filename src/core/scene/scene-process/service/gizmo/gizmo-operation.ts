@@ -7,6 +7,8 @@ import { GizmoMouseEvent } from './utils/defines';
 import { getRaycastResults, raycast, RaycastResults } from './utils/engine-utils';
 import { getRaycastResultNodes, getRegionNodes } from './utils/node-utils';
 import { getSelectNode } from './utils/selection-utils';
+import { getEditorNodeByPath, getEditorNodePath } from './utils/editor-node';
+import { probeSelectionEvents } from './components/light-probe-group/selection';
 
 function getService(): any {
     try {
@@ -26,13 +28,11 @@ function getServiceProp(name: string): any {
 }
 
 function getNodeByPath(path: string): Node | null {
-    const EditorExtends = (cc as any).EditorExtends || (globalThis as any).EditorExtends;
-    return EditorExtends?.Node?.getNodeByPath?.(path) ?? null;
+    return getEditorNodeByPath(path);
 }
 
 function getNodePath(node: Node): string {
-    const EditorExtends = (cc as any).EditorExtends || (globalThis as any).EditorExtends;
-    return EditorExtends?.Node?.getNodePath?.(node) ?? '';
+    return getEditorNodePath(node);
 }
 
 /**
@@ -82,6 +82,31 @@ class GizmoOperation {
     private _noGizmoMouseDownEvent: GizmoMouseEvent | null = null;
     private _mouseDownRaycastGizmos: RaycastResults | null = null;
     private _anyKeyDown = false;
+    private _probeRegionDown: GizmoMouseEvent | undefined;
+    private _probeRegionDragged = false;
+
+    private beginProbeRegion(event: GizmoMouseEvent): boolean {
+        if (!event.leftButton || event.altKey || (event.propagationStopped && !probeSelectionEvents.has(event)) || !getServiceProp('Gizmo')?.queryLightProbeEditMode?.()
+            || getServiceProp('Camera')?.controller?.isMoving?.()) { return false; }
+        this._probeRegionDown = event;
+        this._probeRegionDragged = false;
+        return true;
+    }
+
+    private endProbeRegion(): void {
+        this._probeRegionDown = undefined;
+        this._probeRegionDragged = false;
+        this.clearMouseDownState();
+        getServiceProp('Gizmo')?.execGizmoMethods('cc.LightProbeGroup', 'endRegion');
+        this._hideSelectionRegion();
+    }
+
+    private clearMouseDownState(): void {
+        this._curMouseDownInfos.length = 0;
+        this._gizmoMouseDownEvent = null;
+        this._noGizmoMouseDownEvent = null;
+        this._mouseDownRaycastGizmos = null;
+    }
 
     /**
      * Raycast against gizmo nodes
@@ -207,12 +232,10 @@ class GizmoOperation {
         return true;
     }
 
-    private _onGizmoMouseMove(event: GizmoMouseEvent, results: RaycastResults) {
+    private _onGizmoMouseMove(event: GizmoMouseEvent) {
         if (this._curMouseDownInfos.length > 0) {
-            const map = new Map<Node, Vec3>();
-            results.forEach((info: any) => map.set(info.node, info.hitPoint || new Vec3()));
             for (const info of this._curMouseDownInfos) {
-                event.hitPoint = map.get(info.node) || new Vec3();
+                event.hitPoint = info.hitPoint;
                 this._emitEventToNode(info.node, event);
                 if (event.propagationStopped) break;
             }
@@ -222,10 +245,16 @@ class GizmoOperation {
     // --- Main event handlers ---
 
     public onMouseDown(event: ISceneMouseEvent): boolean | void {
+        // A fresh press must not inherit a region whose mouse-up was lost outside the view.
+        if (this._probeRegionDown) { this.endProbeRegion(); }
         this._gizmoMoved = false;
         this._anyKeyDown = event.altKey || event.ctrlKey || event.shiftKey || event.metaKey;
 
         const customEvent = createGizmoMouseEvent('mouseDown', event);
+        // Snapshot before point-click selection changes, not after; modifiers belong to mouse-down.
+        if (customEvent.leftButton && !customEvent.altKey && getServiceProp('Gizmo')?.queryLightProbeEditMode?.()) {
+            getServiceProp('Gizmo')?.execGizmoMethods('cc.LightProbeGroup', 'beginRegion');
+        }
 
         // 与 cocos-editor 一致：不区分按键，始终做 raycast
         const results = this.raycastGizmos(customEvent.x, customEvent.y);
@@ -233,9 +262,13 @@ class GizmoOperation {
 
         if (results.length > 0) {
             this._gizmoMouseDownEvent = customEvent;
-            return this._onGizmoMouseDown(customEvent, results);
+            const result = this._onGizmoMouseDown(customEvent, results);
+            // Blank-space and unconsumed Gizmo hits share one region state and cleanup path.
+            if (!this.beginProbeRegion(customEvent)) { getServiceProp('Gizmo')?.execGizmoMethods('cc.LightProbeGroup', 'endRegion'); }
+            return result;
         }
 
+        if (this.beginProbeRegion(customEvent)) { return false; }
         this._noGizmoMouseDownEvent = customEvent;
         this._onNotGizmoMouseDown(customEvent);
     }
@@ -243,6 +276,14 @@ class GizmoOperation {
     public onMouseUp(event: ISceneMouseEvent): boolean | void {
         this._anyKeyDown = false;
         const customEvent = createGizmoMouseEvent('mouseUp', event);
+
+        if (this._probeRegionDown) {
+            if (!this._probeRegionDragged && !probeSelectionEvents.has(this._probeRegionDown) && !this._probeRegionDown.ctrlKey && !this._probeRegionDown.metaKey && !this._probeRegionDown.shiftKey) {
+                getServiceProp('Gizmo')?.unselectAllLightProbes?.();
+            }
+            this.endProbeRegion();
+            return false;
+        }
 
         if (this._mouseDownRaycastGizmos && this._mouseDownRaycastGizmos.length > 0) {
             if (!this._gizmoMouseDownEvent) return true;
@@ -258,13 +299,32 @@ class GizmoOperation {
     public onMouseMove(event: ISceneMouseEvent): boolean | void {
         this._gizmoMoved = true;
         const customEvent = createGizmoMouseEvent('mouseMove', event);
+        const probeDown = this._probeRegionDown;
+        if (probeDown) {
+            if (!customEvent.leftButton || !getServiceProp('Gizmo')?.queryLightProbeEditMode?.()) { this.endProbeRegion(); return false; }
+            if (Math.hypot(customEvent.x - probeDown.x, customEvent.y - probeDown.y) < 10 && !this._probeRegionDragged) { return false; }
+            this._probeRegionDragged = true;
+            const left = Math.min(probeDown.x, customEvent.x);
+            const right = Math.max(probeDown.x, customEvent.x);
+            const bottom = Math.min(probeDown.y, customEvent.y);
+            const top = Math.max(probeDown.y, customEvent.y);
+            this._showSelectionRegion(left, right, top, bottom);
+            getServiceProp('Gizmo')?.regionSelectLightProbes?.(left, right, top, bottom, probeDown.ctrlKey || probeDown.metaKey || probeDown.shiftKey);
+            return false;
+        }
+        // The pressed handle owns the gesture until mouse-up, even when the
+        // pointer leaves it. Controllers use deltas or their own drag plane;
+        // repeatedly picking every probe sphere/line cannot change the owner.
+        if (this._gizmoMouseDownEvent && this._curMouseDownInfos.length > 0) {
+            return this._onGizmoMouseMove(customEvent);
+        }
         const results = this.raycastGizmos(customEvent.x, customEvent.y);
 
         if (this._mouseDownRaycastGizmos && this._mouseDownRaycastGizmos.length > 0) {
             if (!this._gizmoMouseDownEvent) {
                 return this._changeMouseHover(customEvent, results);
             }
-            return this._onGizmoMouseMove(customEvent, results);
+            return this._onGizmoMouseMove(customEvent);
         } else {
             if (!this._noGizmoMouseDownEvent) {
                 return this._changeMouseHover(customEvent, results);
@@ -392,6 +452,16 @@ class GizmoOperation {
     ) {
         this._showSelectionRegion(left, right, top, bottom);
 
+        // 框选分流（方案 A）：若当前处于 light-probe vertex 模式，则把矩形交给探针 gizmo
+        // 自行投影判定命中（探针在 GIZMOS 层，走不了下面的场景节点框选），并提前 return，
+        // 完全不改场景节点框选的既有行为。
+        // 每帧传 additive=false：让探针 gizmo 以当前矩形为准重算命中集，天然幂等、无累加抖动。
+        const gizmoSvc = getServiceProp('Gizmo');
+        if (gizmoSvc?.queryLightProbeEditMode?.()) {
+            gizmoSvc.regionSelectLightProbes?.(left, right, top, bottom, false);
+            return;
+        }
+
         const camera = getServiceProp('Camera')?.getCamera?.()?.camera;
         if (!camera) return;
 
@@ -446,6 +516,15 @@ class GizmoOperation {
         getServiceProp('Engine')?.repaintInEditMode?.();
     }
 
+    // 供其它 gizmo（如 light-probe 探针框选）复用同一套选区矩形绘制，保证视觉一致。
+    public showRegionBox(left: number, right: number, top: number, bottom: number): void {
+        this._showSelectionRegion(left, right, top, bottom);
+    }
+
+    public hideRegionBox(): void {
+        this._hideSelectionRegion();
+    }
+
     // --- Keyboard ---
 
     public onKeyDown(event: ISceneKeyboardEvent): boolean | void {
@@ -491,10 +570,12 @@ class GizmoOperation {
     }
 
     public clear() {
-        this._gizmoMouseDownEvent = null;
-        this._noGizmoMouseDownEvent = null;
+        if (this._probeRegionDown) {
+            this.endProbeRegion();
+        } else {
+            this.clearMouseDownState();
+        }
         this._hoverInNodeMap.clear();
-        this._curMouseDownInfos.length = 0;
     }
 }
 

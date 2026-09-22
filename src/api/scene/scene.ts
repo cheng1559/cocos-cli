@@ -17,22 +17,35 @@ import {
     TSaveResult,
 } from './schema';
 import { description, param, result, title, tool } from '../decorator/decorator.js';
-import { COMMON_STATUS, CommonResultType } from '../base/schema-base';
-import { Scene, TSceneTemplateType } from '../../core/scene';
+import { COMMON_STATUS, CommonResultType, getCommonErrorStatus } from '../base/schema-base';
+import { Scene } from '../../core/scene';
+import { assetManager } from '../../core/assets';
 import { ComponentApi } from './component';
 import { NodeApi } from './node';
 import { PrefabApi } from './prefab';
+import { ReflectionProbeApi } from './reflection-probe';
+import { ReferenceImageApi } from './reference-image';
+import { LightFXBakeApi } from './lightfx-bake';
+import { ParticleApi } from './particle';
 import { options } from '../../core/builder/platforms/android/i18n/en';
 
 export class SceneApi {
     public component: ComponentApi;
     public node: NodeApi;
     public prefab: PrefabApi;
+    public reflectionProbe: ReflectionProbeApi;
+    public referenceImage: ReferenceImageApi;
+    public lightFXBake: LightFXBakeApi;
+    public particle: ParticleApi;
 
     constructor() {
         this.component = new ComponentApi();
         this.node = new NodeApi();
         this.prefab = new PrefabApi();
+        this.reflectionProbe = new ReflectionProbeApi();
+        this.referenceImage = new ReferenceImageApi();
+        this.lightFXBake = new LightFXBakeApi();
+        this.particle = new ParticleApi();
     }
 
     @tool('scene-query-current')
@@ -51,7 +64,7 @@ export class SceneApi {
                 (result as any).reason = 'No scene is currently open.';
             }
             return result;
-        } catch (e) { 
+        } catch (e) {
             console.error(e);
             return {
                 code: COMMON_STATUS.FAIL,
@@ -74,7 +87,7 @@ export class SceneApi {
         } catch (e) {
             console.error(e);
             return {
-                code: COMMON_STATUS.FAIL,
+                code: getCommonErrorStatus(e),
                 reason: e instanceof Error ? e.message : String(e)
             };
         }
@@ -126,16 +139,22 @@ export class SceneApi {
     @result(SchemaCreateResult)
     async createScene(@param(SchemaCreateOptions) options: TCreateOptions): Promise<CommonResultType<TCreateResult>> {
         try {
-            const data = await Scene.create({
-                type: 'scene',
-                baseName: options.baseName,
-                targetDirectory: options.dbURL,
-                templateType: options.templateType as TSceneTemplateType,
-            });
-            
+            const assetInfo = await assetManager.createAssetByType(
+                'scene',
+                options.dbURL,
+                options.baseName,
+                { templateName: options.templateType ?? '2d' },
+            );
+            const data: TCreateResult = {
+                assetName: assetInfo.name,
+                assetUuid: assetInfo.uuid,
+                assetUrl: assetInfo.url,
+                assetType: assetInfo.type,
+            };
+
             return {
                 code: COMMON_STATUS.SUCCESS,
-                data: data as TCreateResult,
+                data,
             };
         } catch (e) {
             console.error(e);

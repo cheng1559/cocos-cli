@@ -3,11 +3,13 @@ import CameraControllerBase, { EditorCameraInfo } from './camera-controller-base
 import { CameraMoveMode, CameraUtils } from './utils';
 import FiniteStateMachine from '../utils/state-machine/finite-state-machine';
 import Grid from './grid';
+import { Ruler2D, buildRulerView, type IRulerRenderCamera, type IRulerView } from './ruler-2d';
 import { ModeBase2D } from './modes/mode-base-2d';
 import { IdleMode2D } from './modes/idle-mode-2d';
 import { PanMode2D } from './modes/pan-mode-2d';
 import { tweenPosition } from './tween';
 import type { ISceneMouseEvent, ISceneKeyboardEvent } from '../operation/types';
+import { Rpc } from '../../rpc';
 
 function getCanvasSize(): ISizeLike {
     const canvas = (cc as any).game?.canvas;
@@ -36,6 +38,7 @@ export class CameraController2D extends CameraControllerBase {
     private _panMode!: PanMode2D;
     private _lineColor = cc.color().fromHEX('#555555');
     private _grid!: Grid;
+    private _ruler!: Ruler2D;
     private _contentRect!: Rect;
     private _scale2D = 1;
 
@@ -77,7 +80,7 @@ export class CameraController2D extends CameraControllerBase {
     showGrid(visible: boolean) {
         super.showGrid(visible);
         if (this._originAxisHorizontalMeshComp?.node) {
-            this._originAxisHorizontalMeshComp.node.active = visible;
+            this._originAxisHorizontalMeshComp.node.active = visible && (this.originAxisX_Visible || this.originAxisY_Visible);
         }
     }
 
@@ -88,6 +91,9 @@ export class CameraController2D extends CameraControllerBase {
         this._gridMeshComp = CameraUtils.createGrid('internal/editor/grid-2d', this.node.parent!);
         this._gridMeshComp.node.active = false;
         this._initGrid();
+        this._ruler = new Ruler2D();
+        this._ruler.onNeedRedraw = () => this._refreshRuler();
+        this._ruler.init();
         this._initMode();
         this.initOriginAxis();
     }
@@ -131,8 +137,10 @@ export class CameraController2D extends CameraControllerBase {
             this._camera.near = this._near;
             this._camera.far = this._far;
             this.onResize();
+            this._ruler?.show(true);
             this.showGrid(true);
         } else {
+            this._ruler?.show(false);
             this.showGrid(false);
         }
     }
@@ -259,10 +267,12 @@ export class CameraController2D extends CameraControllerBase {
             this._posAnim = tweenPosition(startPos, targetPos, 300);
             this._posAnim.step((pos: Vec3) => {
                 this.node.setWorldPosition(pos);
+                this._refreshRuler();
             });
         }
 
         this._updateOrthoHeight(scale);
+        this._refreshRuler();
 
         try {
             const { Service } = require('../core/decorator');
@@ -372,6 +382,30 @@ export class CameraController2D extends CameraControllerBase {
         CameraUtils.updateIB(this._gridMeshComp, indices);
 
         this.updateOriginAxis();
+        this._ruler?.updateTicks(this._grid, this._rulerView());
+    }
+
+    /**
+     * 相机更新后立即用最新矩阵刷新刻度。
+     * 各交互流程（缩放/拖拽/复位/resize）都以 adjustCamera 收尾，
+     * 在此处重画可保证刻度不再滞后一帧。
+     */
+    private _refreshRuler(): void {
+        if (!this._ruler || !this._grid) {
+            return;
+        }
+        this._ruler.updateTicks(this._grid, this._rulerView());
+    }
+
+    /**
+     * 刻度尺用的屏幕映射：用渲染相机的 worldToScreen 矩阵换算，
+     * 自动包含父节点变换 / zoom / 视口等所有因素，与最终画面逐像素一致；
+     * 正交投影下映射是仿射的，取 3 个世界点拟合出线性系数即可。
+     */
+    private _rulerView(): IRulerView {
+        const rc = (this._camera as any).camera as IRulerRenderCamera | undefined;
+        const p = this._camera.node.worldPosition;
+        return buildRulerView(rc, this._size, { orthoHeight: this._camera.orthoHeight, x: p.x, y: p.y });
     }
 
     // ---------- 原点轴 ----------
@@ -382,6 +416,22 @@ export class CameraController2D extends CameraControllerBase {
         this.originAxisX_Visible = true;
         this.originAxisY_Visible = true;
         this._originAxisHorizontalMeshComp.node.active = false;
+        void this.initOriginAxisFromConfig();
+    }
+
+    private async initOriginAxisFromConfig() {
+        try {
+            const rpc = Rpc.getInstance();
+            const gizmos = await rpc.request('sceneConfigInstance', 'get', ['gizmo']) as any;
+            if (gizmos?.originAxis2D) {
+                this.updateOriginAxisByConfig({
+                    x: gizmos.originAxis2D.x,
+                    y: gizmos.originAxis2D.y,
+                }, false);
+            }
+        } catch {
+            // Use the default 2D origin axes when config is unavailable.
+        }
     }
 
     updateOriginAxisByConfig(config: { x?: boolean; y?: boolean }, update = true) {
@@ -390,7 +440,7 @@ export class CameraController2D extends CameraControllerBase {
 
         const showAxis = this.originAxisX_Visible || this.originAxisY_Visible;
         if (this._originAxisHorizontalMeshComp?.node) {
-            this._originAxisHorizontalMeshComp.node.active = showAxis;
+            this._originAxisHorizontalMeshComp.node.active = !!this._gridMeshComp?.node?.active && showAxis;
         }
 
         if (update) {
@@ -630,6 +680,7 @@ export class CameraController2D extends CameraControllerBase {
         const width = this._size.width;
         const height = this._size.height;
         this._grid.resize(width, height);
+        this._ruler?.resize();
         this.updateGrid();
         this.adjustCamera();
     }

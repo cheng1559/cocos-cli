@@ -4,23 +4,17 @@ import { ServiceEvents } from './core/global-events';
 import type { ISelectionService, ISelectionEvents, IChangeNodeOptions } from '../../common';
 import { NodeEventType } from '../../common';
 import type { Node } from 'cc';
-
-function getNodeMgr() {
-    return ((cc as any).EditorExtends || (globalThis as any).EditorExtends)?.Node;
-}
+import { getEditorNodeByUuid, getEditorNodePath, getEditorNodeUuidByPath } from './gizmo/utils/editor-node';
+import { normalizeNodePath } from '../../../engine/editor-extends/manager/path-utils';
 
 function pathToUuid(path: string): string {
-    const NodeMgr = getNodeMgr();
-    if (!NodeMgr) return '';
-    return NodeMgr.getNodeUuidByPath?.(path) ?? '';
+    return getEditorNodeUuidByPath(path);
 }
 
 function uuidToPath(uuid: string): string {
-    const NodeMgr = getNodeMgr();
-    if (!NodeMgr) return '';
-    const node = NodeMgr.getNode?.(uuid);
+    const node = getEditorNodeByUuid(uuid);
     if (!node) return '';
-    return NodeMgr.getNodePath(node) ?? '';
+    return getEditorNodePath(node);
 }
 
 interface SelectionEntry {
@@ -64,25 +58,28 @@ export class SelectionService extends BaseService<ISelectionEvents> implements I
     }
 
     select(path: string): void {
-        const index = this._selections.findIndex(e => e.path === path);
+        // 选中项以归一化路径为键，'/Canvas' 与 'Canvas' 是同一个节点，不能存成两条
+        const normalized = normalizeNodePath(path);
+        const index = this._selections.findIndex(e => e.path === normalized);
         if (index !== -1) return;
-        const uuid = pathToUuid(path);
-        this._selections.unshift({ path, uuid });
+        const uuid = pathToUuid(normalized);
+        this._selections.unshift({ path: normalized, uuid });
         if (uuid) {
             this._callFocusInEditor(uuid);
         }
-        this.broadcast('selection:select', path, this._getPaths());
+        this.broadcast('selection:select', normalized, this._getPaths());
     }
 
     unselect(path: string): void {
-        const index = this._selections.findIndex(e => e.path === path);
+        const normalized = normalizeNodePath(path);
+        const index = this._selections.findIndex(e => e.path === normalized);
         if (index === -1) return;
         const entry = this._selections[index];
         this._selections.splice(index, 1);
         if (entry.uuid) {
             this._callLostFocusInEditor(entry.uuid);
         }
-        this.broadcast('selection:unselect', path, this._getPaths());
+        this.broadcast('selection:unselect', normalized, this._getPaths());
     }
 
     clear(): void {
@@ -103,7 +100,8 @@ export class SelectionService extends BaseService<ISelectionEvents> implements I
     }
 
     isSelect(path: string): boolean {
-        return this._selections.some(e => e.path === path);
+        const normalized = normalizeNodePath(path);
+        return this._selections.some(e => e.path === normalized);
     }
 
     reset(): void {
@@ -116,9 +114,7 @@ export class SelectionService extends BaseService<ISelectionEvents> implements I
 
     private _callFocusInEditor(uuid: string): void {
         try {
-            const NodeMgr = getNodeMgr();
-            if (!NodeMgr) return;
-            const node = NodeMgr.getNode(uuid);
+            const node = getEditorNodeByUuid(uuid) as any;
             if (!node?._components) return;
             for (const comp of node.components) {
                 if (comp?.onFocusInEditor) {
@@ -132,9 +128,7 @@ export class SelectionService extends BaseService<ISelectionEvents> implements I
 
     private _callLostFocusInEditor(uuid: string): void {
         try {
-            const NodeMgr = getNodeMgr();
-            if (!NodeMgr) return;
-            const node = NodeMgr.getNode(uuid);
+            const node = getEditorNodeByUuid(uuid) as any;
             if (!node?._components) return;
             for (const comp of node.components) {
                 if (comp?.onLostFocusInEditor) {

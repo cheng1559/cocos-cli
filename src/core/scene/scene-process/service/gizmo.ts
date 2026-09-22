@@ -1,6 +1,6 @@
 'use strict';
 
-import { Camera, Color, Component, gfx, js, Layers, Node, Rect, Vec3, director } from 'cc';
+import { Camera, Color, Component, gfx, js, Layers, Node, Rect, Terrain, Vec3, director } from 'cc';
 import { BaseService } from './core';
 import { register, Service } from './core/decorator';
 import { ServiceEvents } from './core/global-events';
@@ -8,6 +8,7 @@ import { TransformToolData, ISnapConfigData } from './gizmo/transform-tool';
 import GizmoDefines from './gizmo/gizmo-defines';
 import GizmoBase from './gizmo/base/gizmo-base';
 import GizmoOperation from './gizmo/gizmo-operation';
+import { getEditorNodeByPath, getEditorNodeByUuid, getEditorNodePath } from './gizmo/utils/editor-node';
 import { create3DNode } from './gizmo/utils/engine-utils';
 import { rectTransformSnapping } from './gizmo/utils/rect-transform-snapping';
 import WorldAxisController from './gizmo/controller/world-axis';
@@ -34,12 +35,25 @@ import './gizmo/components/mesh-collider';
 import './gizmo/components/box-collider-2d';
 import './gizmo/components/circle-collider-2d';
 import './gizmo/components/polygon-collider-2d';
+import './gizmo/components/distance-joint-2d';
+import './gizmo/components/spring-joint-2d';
+import './gizmo/components/hinge-joint-2d';
+import './gizmo/components/fixed-joint-2d';
+import './gizmo/components/relative-joint-2d';
+import './gizmo/components/slider-joint-2d';
+import './gizmo/components/wheel-joint-2d';
 import './gizmo/components/mesh-renderer';
 import './gizmo/components/skinned-mesh-renderer';
 import './gizmo/components/video-player';
 import './gizmo/components/web-view';
 import './gizmo/components/light-probe-group';
 import './gizmo/components/reflection-probe';
+import './gizmo/components/lod-group';
+import './gizmo/components/particle-system';
+// Avoid browser-runtime require('cc') while keeping lightweight cc mocks from loading Terrain dependencies.
+if (Terrain) {
+    require('./gizmo/components/terrain');
+}
 
 type TGizmoType = 'icon' | 'persistent' | 'component';
 
@@ -132,18 +146,15 @@ function walkNodeComponent(node: Node, callback: (comp: Component) => void): voi
 }
 
 function getNodeByPath(path: string): Node | null {
-    const EditorExtends = (cc as any).EditorExtends || (globalThis as any).EditorExtends;
-    return EditorExtends?.Node?.getNodeByPath?.(path) ?? null;
+    return getEditorNodeByPath(path);
 }
 
 function getNodeByUuid(uuid: string): Node | null {
-    const EditorExtends = (cc as any).EditorExtends || (globalThis as any).EditorExtends;
-    return EditorExtends?.Node?.getNode?.(uuid) ?? null;
+    return getEditorNodeByUuid(uuid);
 }
 
 function getNodePath(node: Node): string {
-    const EditorExtends = (cc as any).EditorExtends || (globalThis as any).EditorExtends;
-    return EditorExtends?.Node?.getNodePath?.(node) ?? '';
+    return getEditorNodePath(node);
 }
 const SceneGizmoLayer = Layers.Enum.SCENE_GIZMO;
 
@@ -161,6 +172,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
     private _gizmoOperation!: GizmoOperation;
     private _iconVisible = false;
     private _selection: string[] = [];
+    private _hasEditorOpened = false;
 
     // Pool: Map<className, GizmoBase[]> — 与 cocos-editor GizmoPool 一致
     private _componentPool: Map<string, GizmoBase[]> = new Map();
@@ -359,6 +371,10 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         // 与 cocos-editor TransformGizmoManager.__listenEvents 一致：snap 配置变更持久化
         this._listenSnapEvents();
 
+        // 与 cocos-editor GizmoManager.init 一致：gizmo 配置只在服务初始化时恢复。
+        // 打开/重载场景时会强制切回 position，避免异步配置读取覆盖场景打开流程。
+        void this.initFromConfig();
+
         // 与 cocos-editor GizmoManager.init 一致：监听相机投影变化
         try {
             (Service as any).Camera?.controller?.on?.('projection-changed', (projection: number) => {
@@ -399,8 +415,10 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
                 if (config.is2D !== undefined) this.is2D = config.is2D;
                 if (config.is3DIcon !== undefined) this.setIconGizmo3D(config.is3DIcon);
                 if (config.iconSize !== undefined) this.setIconGizmoSize(config.iconSize);
-                if (config.transformToolName !== undefined) this.transformToolName = config.transformToolName;
-                if (config.viewMode !== undefined) this.viewMode = config.viewMode;
+                if (!this._hasEditorOpened) {
+                    if (config.transformToolName !== undefined) this.transformToolName = config.transformToolName;
+                    if (config.viewMode !== undefined) this.viewMode = config.viewMode;
+                }
                 if (config.pivot !== undefined) this.setPivot(config.pivot);
                 if (config.coordinate !== undefined) this.setCoordinate(config.coordinate);
                 if (config.toolsVisibility3d !== undefined) {
@@ -428,23 +446,34 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         try {
             const rpc = Rpc.getInstance();
             const current = await rpc.request('sceneConfigInstance', 'get', ['gizmo', 'local']) as Record<string, any> ?? {};
+            // 注意：GizmoConfig 拥有的字段（gridColor、is3DIcon、iconSize、toolsVisibility3d、
+            // originAxis2D、originAxis3D）不在此写入，改由各自 setter 定向落盘（见 _saveGizmoConfigField），
+            // 避免打开场景切回 position 触发的 saveConfig 用尚未载入的默认值覆盖已保存的配置。
+            // 这里用 ...current 保留磁盘上已有的这些字段，只写会随场景/操作实时变化的字段。
             const gizmoConfig = {
                 ...current,
                 is2D: this.is2D,
-                is3DIcon: this.isIconGizmo3D(),
-                iconSize: this.queryIconGizmoSize(),
                 transformToolName: this.transformToolName,
                 viewMode: this.viewMode,
                 pivot: this.pivot,
                 coordinate: this.coordinate,
-                toolsVisibility3d: this.queryToolsVisibility3d(),
                 snapConfigs: this.transformToolData.snapConfigs.getPureDataObject(),
                 rectSnapConfig: rectTransformSnapping.getPureDataObject(),
-                gridColor: this.queryGridColor(),
-                originAxis2D: this.queryOriginAxes2D(),
-                originAxis3D: this.queryOriginAxes3D(),
             };
             await rpc.request('sceneConfigInstance', 'set', ['gizmo', gizmoConfig, 'local']);
+        } catch {
+            // Config persistence not available
+        }
+    }
+
+    // GizmoConfig 拥有的字段单独定向落盘，与 _saveSnapConfig 一致，不经过整块 saveConfig。
+    // 原因：saveConfig 会用 GizmoConfig 静态量重新快照所有字段，若某字段尚未从磁盘载入（仍是默认值），
+    // 由其它改动触发的 saveConfig 会把它写回默认值，覆盖上次保存的个性化配置。改为逐字段定向落盘后，
+    // 每次只写发生变化的那个字段，其余字段由 saveConfig 的 ...current 从磁盘原样保留。
+    private async _saveGizmoConfigField(subKey: string, value: unknown): Promise<void> {
+        try {
+            const rpc = Rpc.getInstance();
+            await rpc.request('sceneConfigInstance', 'set', [`gizmo.${subKey}`, value, 'local']);
         } catch {
             // Config persistence not available
         }
@@ -490,7 +519,11 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
                             if (gizmo.target !== component) {
                                 this._showGizmo('component', component, true);
                             }
-                            gizmo.checkVisible() ? gizmo.show() : gizmo.hide();
+                            const visible = gizmo.checkVisible();
+                            if (visible)
+                                gizmo.show();
+                            else
+                                gizmo.hide();
                         }
                     });
                 }
@@ -499,7 +532,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
             }
         }
         Service.Engine?.repaintInEditMode?.();
-        void this.saveConfig();
+        void this._saveGizmoConfigField('toolsVisibility3d', GizmoConfig.toolsVisibility3d);
     }
 
     isIconGizmo3D(): boolean {
@@ -516,7 +549,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
             }
         });
         Service.Engine?.repaintInEditMode?.();
-        void this.saveConfig();
+        void this._saveGizmoConfigField('is3DIcon', GizmoConfig.isIconGizmo3D);
     }
 
     queryIconGizmoSize(): number {
@@ -533,7 +566,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
             }
         });
         Service.Engine?.repaintInEditMode?.();
-        void this.saveConfig();
+        void this._saveGizmoConfigField('iconSize', GizmoConfig.iconGizmoSize);
     }
 
     queryGridColor(): number[] {
@@ -543,8 +576,8 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
     setGridColor(color: number[]): void {
         if (!color) return;
         GizmoConfig.gridColor = [...color];
-        Service.Camera?.setGridColor?.(color);
-        void this.saveConfig();
+        Service.Camera?.setGridColor?.(color, false);
+        void this._saveGizmoConfigField('gridColor', [...color]);
     }
 
     queryOriginAxes2D(): IOriginAxesConfig {
@@ -555,7 +588,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         if (!config) return;
         GizmoConfig.originAxis2D = { ...config };
         Service.Camera?.setOriginAxes2D?.(config);
-        void this.saveConfig();
+        void this._saveGizmoConfigField('originAxis2D', { ...GizmoConfig.originAxis2D });
     }
 
     queryOriginAxes3D(): IOriginAxesConfig {
@@ -566,7 +599,7 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         if (!config) return;
         GizmoConfig.originAxis3D = { ...config };
         Service.Camera?.setOriginAxes3D?.(config);
-        void this.saveConfig();
+        void this._saveGizmoConfigField('originAxis3D', { ...GizmoConfig.originAxis3D });
     }
 
     setIconVisible(visible: boolean): void {
@@ -805,6 +838,11 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         return !stopped;
     }
 
+    /** Returns the component gizmo without exposing the internal WeakMap to callers. */
+    getComponentGizmo(component: Component): GizmoBase | null {
+        return getGizmoProperty('component', component) ?? null;
+    }
+
     // ── Selection integration (与 cocos-editor SelectionGizmoManager 一致) ─────
 
     querySelectNodes(): Node[] {
@@ -877,23 +915,44 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
         });
     }
 
-    private _rebindSelectedGizmos(): void {
-        const selectedPaths = Service.Selection?.query?.() ?? [];
+    private _reselectCurrentSelection(): void {
+        const selectedPaths = Array.from(new Set(Service.Selection?.query?.() ?? []));
         this._selection.length = 0;
+        Service.Selection?.clear?.();
         for (const path of selectedPaths) {
-            this.onSelectionSelect(path);
+            if (!getNodeByPath(path)) {
+                continue;
+            }
+            Service.Selection?.select?.(path);
         }
     }
 
     // ── 编辑器生命周期（由 BaseService 事件钩子调用）───────────────────────────
 
+    refreshSelectedGizmos(): void {
+        const selectedPaths = Service.Selection?.query?.() ?? [];
+        let refreshed = false;
+        for (const path of selectedPaths) {
+            const node = getNodeByPath(path);
+            if (node) {
+                this.onNodeChanged(node);
+                refreshed = true;
+            }
+        }
+        if (refreshed) {
+            Service.Engine?.repaintInEditMode?.();
+        }
+    }
+
     onEditorOpened(): void {
+        this._hasEditorOpened = true;
         this.clearAllGizmos();
+        // 与 Creator onSceneOpened 一致：场景加载后 active 才可靠，每次打开都回到移动工具。
+        this.transformToolName = 'position';
         this._showIconGizmosForScene();
-        this.initFromConfig();
         // 编辑器打开/重载后节点和组件对象可能已重建，保留选择路径并重新挂到新组件上。
-        this._rebindSelectedGizmos();
-        // Camera.onEditorOpened 有 200ms 延迟的 defaultFocus，需要等它完成后再显示世界坐标轴
+        this._reselectCurrentSelection();
+        // Camera.onEditorOpened 会异步恢复视图；延后一帧再补注册并刷新世界坐标轴。
         setTimeout(() => {
             // init 阶段编辑器相机还不存在，registerCameraMovedEvent 静默失败，此处补注册
             this._worldAxisController?.registerCameraMovedEvent();
@@ -1103,6 +1162,83 @@ export class GizmoService extends BaseService<IGizmoEvents> implements IGizmoSer
             return;
         }
         return methods[funcName](...params);
+    }
+
+    // ── Light Probe 编辑模式 facade（对齐 Creator general-scene-facade.ts L1438-1467）──
+
+    // 切换逐探针（vertex）编辑模式：非 vertex 时按 mode 进入 vertex，已在 vertex 则退回 none。
+    toggleLightProbeEditMode(mode: boolean | undefined): boolean {
+        mode = Boolean(mode);
+        const currentMode = this.execGizmoMethods('cc.LightProbeGroup', 'getEditMode', []);
+        if (currentMode !== 'vertex') {
+            if (mode) this.execGizmoMethods('cc.LightProbeGroup', 'changeEditMode', ['vertex']);
+        } else {
+            this.execGizmoMethods('cc.LightProbeGroup', 'changeEditMode', ['none']);
+        }
+        return this.queryLightProbeEditMode();
+    }
+
+    queryLightProbeEditMode(): boolean {
+        return this.execGizmoMethods('cc.LightProbeGroup', 'getEditMode', []) === 'vertex';
+    }
+
+    // 切换包围盒（box / Edit Area Box）编辑模式：非 box 时按 mode 进入 box，已在 box 则退回 none。
+    toggleLightProbeBoundingBoxEditMode(mode: boolean | undefined): boolean {
+        mode = Boolean(mode);
+        const currentMode = this.execGizmoMethods('cc.LightProbeGroup', 'getEditMode', []);
+        if (currentMode !== 'box') {
+            if (mode) this.execGizmoMethods('cc.LightProbeGroup', 'changeEditMode', ['box']);
+        } else {
+            this.execGizmoMethods('cc.LightProbeGroup', 'changeEditMode', ['none']);
+        }
+        return this.queryLightProbeBoundingBoxEditMode();
+    }
+
+    queryLightProbeBoundingBoxEditMode(): boolean {
+        return this.execGizmoMethods('cc.LightProbeGroup', 'getEditMode', []) === 'box';
+    }
+
+    // 全选 / 取消全选 vertex 模式下的探针（点选/增选在探针球鼠标事件里处理）。
+    selectAllLightProbes(): void {
+        this.execGizmoMethods('cc.LightProbeGroup', 'selectAllProbes', []);
+    }
+
+    unselectAllLightProbes(): void {
+        this.execGizmoMethods('cc.LightProbeGroup', 'unselectAllProbes', []);
+    }
+
+    queryLightProbeSelectedCount(): number {
+        return this.execGizmoMethods('cc.LightProbeGroup', 'getSelectedProbeCount', []) ?? 0;
+    }
+
+    // 删除 / 复制 vertex 模式下选中的探针（也可由 gizmo onKeyDown 直接触发）。
+    async deleteSelectedLightProbes(): Promise<number> {
+        return await this.execGizmoMethods('cc.LightProbeGroup', 'deleteSelectedProbes', []) ?? 0;
+    }
+
+    async duplicateSelectedLightProbes(): Promise<number> {
+        return await this.execGizmoMethods('cc.LightProbeGroup', 'duplicateSelectedProbes', []) ?? 0;
+    }
+
+    // 框选探针（方案 A）：上层框选时主动调用，把屏幕矩形交给 light-probe gizmo 自行投影判定。
+    // rect 为规整后的屏幕坐标（left<right、bottom<top）；additive=true 并入现有选中集合。
+    // 返回当前选中探针总数；仅 vertex 模式生效，其它模式返回 0。
+    regionSelectLightProbes(left: number, right: number, top: number, bottom: number, additive: boolean): number {
+        return this.execGizmoMethods('cc.LightProbeGroup', 'regionSelectProbes', [left, right, top, bottom, additive]) ?? 0;
+    }
+
+    /** 为当前选中的一个或多个 LightProbeGroup 重新生成探针。 */
+    generateLightProbes(): number {
+        return this.execGizmoMethods('cc.LightProbeGroup', 'generateLightProbes', []) ?? 0;
+    }
+
+    // 绘制/清除框选选区矩形（复用 gizmo-operation 的实现，供探针框选保持视觉一致）。
+    showRegionBox(left: number, right: number, top: number, bottom: number): void {
+        (this._gizmoOperation as any)?.showRegionBox?.(left, right, top, bottom);
+    }
+
+    hideRegionBox(): void {
+        (this._gizmoOperation as any)?.hideRegionBox?.();
     }
 
     _changeRegionSelectMode(mode: number): void {

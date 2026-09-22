@@ -1,5 +1,5 @@
 import { PreviewBase } from './preview-base';
-import { scenePreview, ScenePreview } from './scene-preview';
+import { scenePreview } from './scene-preview';
 import { MiniPreview } from './mini-preview';
 import { MaterialPreview } from './material-preview';
 import { ModelPreview } from './model-preview';
@@ -7,7 +7,9 @@ import { MeshPreview } from './mesh-preview';
 import { SkeletonPreview } from './skeleton-preview';
 import { PrefabPreview } from './prefab-preview';
 import { SpinePreview } from './spine-preview';
+import { MotionPreview } from './motion-preview';
 import { Camera, gfx } from 'cc';
+import type { MotionPreviewDesc } from '../../../common/preview';
 import { BaseService, register, Service } from '../core';
 import { Rpc } from '../../rpc';
 import type { InteractivePreview } from './interactive-preview';
@@ -24,6 +26,8 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
     private _typeMap: Map<string, PreviewTypeEntry> = new Map();
     private _initialized = false;
     private _activePreview: IPreviewInstance | null = null;
+    private _activeUuid: string | null = null;
+    private _reloadTimer: ReturnType<typeof setTimeout> | null = null;
 
     scenePreview = scenePreview;
     materialPreview = new MaterialPreview();
@@ -33,6 +37,7 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
     skeletonPreview = new SkeletonPreview();
     prefabPreview = new PrefabPreview();
     spinePreview = new SpinePreview();
+    motionPreview = new MotionPreview();
 
     get activePreview(): IPreviewInstance | null {
         return this._activePreview;
@@ -49,6 +54,7 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
         this.initPreview('scene:skeleton-preview', 'query-skeleton-preview-data', this.skeletonPreview);
         this.initPreview('scene:prefab-preview', 'query-prefab-preview-data', this.prefabPreview);
         this.initPreview('scene:spine-preview', 'query-spine-preview-data', this.spinePreview);
+        this.initPreview('scene:motion-preview', 'query-motion-preview-data', this.motionPreview);
         this.initTypeMap();
         console.log('[Preview] PreviewService initialized');
     }
@@ -71,8 +77,8 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
 
     // importer name → preview type 的映射（用于 assetType 为 cc.Asset 等泛型的回退）
     private static readonly IMPORTER_MAP: Record<string, string> = {
-        'gltf': 'model',
-        'fbx': 'model',
+        gltf: 'model',
+        fbx: 'model',
         'spine-data': 'spine',
     };
 
@@ -108,6 +114,80 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
         return false;
     }
 
+    // --- 通用 Motion 预览（透传到 motionPreview 实例） ---
+
+    public async showMotion(desc: MotionPreviewDesc): Promise<boolean> {
+        return this.motionPreview.showMotion(desc);
+    }
+
+    public async hideMotion(): Promise<void> {
+        // 结束未完成的相机手势，避免调用方在释放事件丢失后污染下一次预览。
+        if (this.motionPreview.isActive) {
+            this.motionPreview.onMouseUp({ x: 0, y: 0 });
+        }
+        await this.motionPreview.hideMotionPreview();
+    }
+
+    public async setMotionModel(uuid: string): Promise<void> {
+        await this.motionPreview.setModel(uuid);
+    }
+
+    public async setMotionTime(time: number): Promise<void> {
+        await this.motionPreview.setTimeMotionPreview(time);
+    }
+
+    public async playMotion(): Promise<void> {
+        await this.motionPreview.playMotionPreview();
+    }
+
+    public async pauseMotion(): Promise<void> {
+        await this.motionPreview.pauseMotionPreview();
+    }
+
+    public async stopMotion(): Promise<void> {
+        await this.motionPreview.stopMotionPreview();
+    }
+
+    public async setMotionVariable(name: string, value: number): Promise<void> {
+        await this.motionPreview.setMotionPreviewVariable(name, value);
+    }
+
+    public async setMotionParameter(axis: 'value' | 'x' | 'y', value: number): Promise<void> {
+        await this.motionPreview.setMotionPreviewParameter(axis, value);
+    }
+
+    public async getMotionTimelineStats(): Promise<{ timeLineLength: number } | null> {
+        return this.motionPreview.getMotionPreviewTimelineStats();
+    }
+
+    public async isMotionActive(): Promise<boolean> {
+        return this.motionPreview.isActive;
+    }
+
+    public async queryMotionImage(info: { width: number; height: number }): Promise<unknown> {
+        return this.motionPreview.queryPreviewData(info);
+    }
+
+    public async onMotionMouseDown(action: { x: number; y: number; button: number }): Promise<void> {
+        if (!this.motionPreview.isActive) return;
+        this.motionPreview.onMouseDown(action);
+    }
+
+    public async onMotionMouseMove(action: { movementX: number; movementY: number }): Promise<void> {
+        if (!this.motionPreview.isActive) return;
+        this.motionPreview.onMouseMove(action);
+    }
+
+    public async onMotionMouseUp(action: { x: number; y: number }): Promise<void> {
+        if (!this.motionPreview.isActive) return;
+        this.motionPreview.onMouseUp(action);
+    }
+
+    public async onMotionMouseWheel(action: { wheelDeltaY: number; wheelDeltaX: number }): Promise<void> {
+        if (!this.motionPreview.isActive) return;
+        this.motionPreview.onMouseWheel(action);
+    }
+
     // --- 上屏预览 ---
 
     async open(uuid: string): Promise<IPreviewInstance | null> {
@@ -126,20 +206,40 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
         // 清理上一个预览的相机
         if (this._activePreview) {
             const prev = this._activePreview as any;
-            if (prev.cameraComp) {
+            if (typeof prev.hide === 'function') {
+                prev.hide();
+            } else if (prev.cameraComp) {
                 prev.cameraComp.enabled = false;
+                if (prev.camera) {
+                    prev.camera.enabled = false;
+                }
             }
         }
 
         // 设置资源
         await (entry.instance as any)[entry.setup](uuid);
         this._activePreview = entry.instance as unknown as IPreviewInstance;
+        this._activeUuid = uuid;
 
         // 将相机挂到 mainWindow 上屏渲染
         this.attachToMainWindow(entry.instance as InteractivePreview);
-        Service.Engine.repaintInEditMode();
+        await this.refreshPreviewCameraView(entry.instance as InteractivePreview);
 
         return this._activePreview;
+    }
+
+    onAssetChanged(uuid: string) {
+        if (!this._activeUuid || this._activeUuid !== uuid) return;
+        if (this._reloadTimer) {
+            clearTimeout(this._reloadTimer);
+        }
+        this._reloadTimer = setTimeout(() => {
+            this._reloadTimer = null;
+            if (this._activeUuid !== uuid) return;
+            void this.open(uuid).catch((err) => {
+                console.warn(`[Preview] Failed to reload changed asset ${uuid}:`, err);
+            });
+        }, 50);
     }
 
     private attachToMainWindow(previewInstance: InteractivePreview) {
@@ -181,6 +281,7 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
 
         if (inst.worldAxis) {
             inst.worldAxis._sceneGizmoCamera.camera.changeTargetWindow(mainWindow);
+            inst.worldAxis._sceneGizmoCamera.camera.enabled = true;
             if (inst.enableAxis) {
                 inst.worldAxis.show();
             }
@@ -188,6 +289,45 @@ export class PreviewService extends BaseService<IPreviewEvents> implements IPrev
     }
 
     // --- 缩略图生成 ---
+
+    private async refreshPreviewCameraView(previewInstance: InteractivePreview) {
+        const preview = previewInstance as any;
+        if (typeof preview.resetCameraView !== 'function') {
+            Service.Engine.repaintInEditMode();
+            return;
+        }
+
+        preview.resetCameraView();
+        Service.Engine.repaintInEditMode();
+
+        await new Promise<void>((resolve) => {
+            let resolved = false;
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                resolve();
+            };
+            const timer = setTimeout(finish, 100);
+            cc.director.once(cc.Director.EVENT_AFTER_DRAW, () => {
+                clearTimeout(timer);
+                finish();
+            });
+        });
+
+        if (this._activePreview !== previewInstance) return;
+        this.attachToMainWindow(previewInstance);
+        preview.resetCameraView();
+        this.forcePreviewRepaint();
+    }
+
+    private forcePreviewRepaint() {
+        const engine = Service.Engine as any;
+        if (typeof engine.forceRepaintInEditMode === 'function') {
+            engine.forceRepaintInEditMode();
+        } else {
+            Service.Engine.repaintInEditMode();
+        }
+    }
 
     public async generateThumbnail(uuid: string, assetType: string, width = 128, height = 128) {
         const entry = this.resolvePreview(assetType);

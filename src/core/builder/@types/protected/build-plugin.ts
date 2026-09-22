@@ -53,6 +53,7 @@ export type IBuilderRegisterInfo = IPlatformRegisterInfo | IPluginRegisterInfo;
 export interface PlatformBuildSchema {
     common: ICocosConfigurationPropertySchema;
     platformOptions: ICocosConfigurationPropertySchema;
+    supportPlatforms?: IPlatformSupportPlatformsConfig;
 }
 
 export interface PlatformConfigItem {
@@ -234,6 +235,9 @@ export namespace IInternalHook {
     export type onBeforeUpload = IInternalStageTaskHooks;
     export type upload = IInternalStageTaskHooks;
     export type onAfterUpload = IInternalStageTaskHooks;
+
+    // 内置插件才有可能触发这个函数
+    export type publish = IInternalStageTaskHooks;
 }
 
 export interface PlatformPackageOptions {
@@ -340,6 +344,13 @@ export interface IInternalBuildPluginConfig extends IBuildPluginConfig {
     internal?: boolean; // 注册后，构建插件赋予的标记，插件指定无效
     customBuildStages?: Array<IBuildStageItem>;
 }
+
+export interface IPlatformSupportPlatformsConfig {
+    platforms: string[];
+    controlledBy: string;
+    hidden?: boolean;
+}
+
 export interface IPlatformBuildPluginConfig extends MakeRequired<IInternalBuildPluginConfig, 'displayName'> {
     platformType: StatsQuery.ConstantManager.PlatformType,
     icon?: IconConfig; // 平台 icon
@@ -352,6 +363,7 @@ export interface IPlatformBuildPluginConfig extends MakeRequired<IInternalBuildP
         platformType: IPlatformType;
     };
     // icon 操作注册信息
+    supportPlatforms?: IPlatformSupportPlatformsConfig;
     customIconConfigs?: Array<IBuildIconItem>;
 };
 

@@ -1,4 +1,4 @@
-import { Component, Constructor, animation, Animation, Node, RigidBody, Collider, ERigidBodyType, EColliderType, MeshCollider, UITransform, director, Canvas } from 'cc';
+import { Component, Constructor, animation, Animation, Node, RigidBody, Collider, ERigidBodyType, EColliderType, MeshCollider, UITransform, director, Canvas, Scene, PolygonCollider2D } from 'cc';
 import { Rpc } from '../rpc';
 import { register, Service, BaseService } from './core';
 import {
@@ -12,7 +12,15 @@ import {
     IComponent,
     IQueryClassesOptions,
     ISetPropertyOptions,
-    IUndoRedoResult
+    IUndoRedoResult,
+    IRecalculateLODGroupBoundsOptions,
+    ILODGroupBoundsResult,
+    IInsertLODOptions,
+    IEraseLODOptions,
+    IQueryLODGroupRelativeHeightOptions,
+    ILODGroupLevelsResult,
+    IRegeneratePolygon2DPointsOptions,
+    IRegeneratePolygon2DPointsResult,
 } from '../../common';
 import dumpUtil from './dump';
 import compMgr from './component/index';
@@ -28,8 +36,33 @@ import { RemoveComponentCommand } from './undo/commands/remove-component-command
 import { createUndoId, restoreComponentSnapshotDump, snapshotMapsEqual } from './undo/commands/command-utils-shared';
 import { isUndoApplying } from './undo/applying-state';
 import { broadcastAnimationPropertyCommitted } from './animation/property-commit-event';
+import { isRootNodePath } from '../../../engine/editor-extends/manager/path-utils';
+import {
+    requireLODGroup,
+    queryLODGroupRelativeHeight,
+    serializeLODGroupBounds,
+    serializeLODGroupLevels,
+    validateLODErase,
+    validateLODInsert,
+} from './component/lod-group';
+import {
+    arePolygonPointsEqual,
+    createPolygonPointsPropertyDump,
+    generatePolygonPoints,
+    initializePolygonCollider2DPoints,
+    requirePolygonCollider2D,
+    validatePolygonPoints,
+} from './component/polygon-collider-2d';
 
 const NodeMgr = EditorExtends.Node;
+
+function resolveNodeByPath(nodePath: string): Node | null {
+    // '/' 指当前编辑器的根：prefab 模式下是 prefab 根节点（可以挂组件），而不是承载它的虚拟场景
+    if (isRootNodePath(nodePath)) {
+        return Service.Editor.getRootNode() as Node | null;
+    }
+    return NodeMgr.getNodeByPath(nodePath) as Node | null;
+}
 
 interface IComponentPropertySnapshot {
     nodeUuid: string;
@@ -209,9 +242,12 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
                 return lastDump!;
             }
 
-            const node = NodeMgr.getNodeByPath(params.nodePath);
+            const node = resolveNodeByPath(params.nodePath);
             if (!node) {
                 throw new Error(`create component failed: ${params.nodePath} does not exist`);
+            }
+            if (node instanceof Scene) {
+                throw new Error(`create component failed: cannot attach a component to the scene root (${params.nodePath})`);
             }
             if (!params.component || params.component.length <= 0) {
                 throw new Error(`create component failed: component name cannot be empty`);
@@ -251,6 +287,9 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
             this.checkDynamicBodyShape(node);
 
             compMgr.onComponentAddedFromEditor(comp);
+            if (comp instanceof PolygonCollider2D) {
+                await initializePolygonCollider2DPoints(comp);
+            }
             this.emit('node:change', node, { type: NodeEventType.CREATE_COMPONENT });
 
             const dump = dumpUtil.dumpComponent(comp as Component) as IComponent;
@@ -371,6 +410,69 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
         }
     }
 
+    async regeneratePolygon2DPoints(
+        options: IRegeneratePolygon2DPointsOptions,
+    ): Promise<IRegeneratePolygon2DPointsResult> {
+        const path = options.path;
+
+        try {
+            await Service.Editor.lock();
+
+            const component = await this.findComponent(path);
+            const collider = requirePolygonCollider2D(component, path);
+            const generated = await generatePolygonPoints(collider);
+            validatePolygonPoints(generated.points);
+
+            if (arePolygonPointsEqual(collider.points, generated.points)) {
+                return {
+                    path,
+                    changed: false,
+                    pointCount: generated.points.length,
+                    source: generated.source,
+                };
+            }
+
+            const componentIndex = collider.node.components.indexOf(collider);
+            if (componentIndex < 0) {
+                throw new Error('PolygonCollider2D is no longer attached to its node.');
+            }
+
+            const componentDump = dumpUtil.dumpComponent(collider) as IComponent;
+            const pointsDump = createPolygonPointsPropertyDump(
+                componentDump.value?.points,
+                generated.points,
+            );
+            if (!pointsDump) {
+                throw new Error('Unable to encode PolygonCollider2D.points from the component dump.');
+            }
+
+            const nodePath = NodeMgr.getNodePath(collider.node)
+                || (collider.node === Service.Editor.getRootNode() ? '/' : '');
+            if (!nodePath) {
+                throw new Error('Unable to resolve the PolygonCollider2D node path.');
+            }
+
+            const committed = await this.setProperty({
+                nodePath,
+                path: `__comps__.${componentIndex}.points`,
+                dump: pointsDump,
+                record: options.record,
+            });
+            if (!committed) {
+                throw new Error('Failed to commit PolygonCollider2D.points through ComponentService.setProperty().');
+            }
+
+            return {
+                path,
+                changed: true,
+                pointCount: generated.points.length,
+                source: generated.source,
+            };
+        } finally {
+            Service.Editor.unlock();
+        }
+    }
+
     async setProperty(options: ISetPropertyOptions): Promise<boolean> {
         // 多个节点更新值
         if (Array.isArray(options.nodePath)) {
@@ -397,7 +499,7 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
                 return false;
             }
         }
-        const node = NodeMgr.getNodeByPath(options.nodePath);
+        const node = resolveNodeByPath(options.nodePath);
         if (!node) {
             console.warn(`Set property failed: ${options.nodePath} does not exist`);
             return false;
@@ -450,16 +552,39 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
         return result;
     }
 
+    /** Internal entry used by Node.resetProperty for component paths. */
+    async resetProperty(options: ISetPropertyOptions): Promise<boolean> {
+        const node = resolveNodeByPath(options.nodePath);
+        if (!node || !this._resolveComponentPropertyTarget(node, options.path)) {
+            return false;
+        }
+        return this._recordComponentPropertySnapshot(node, {
+            label: `Reset ${options.path}`,
+            type: 'component:reset-property',
+            nodePath: options.nodePath,
+            path: options.path,
+            record: options.record,
+        }, async () => {
+            this.emit('node:before-change', node);
+            await dumpUtil.resetProperty(node, options.path);
+            this.emit('node:change', node, {
+                type: NodeEventType.SET_PROPERTY, propPath: options.path, record: options.record,
+            });
+            return true;
+        });
+    }
+
     private _shouldRecordComponentCommand(): boolean {
         return !Service.Undo?.isApplying?.();
     }
 
     private async _recordComponentSnapshot(
         component: Component,
-        options: { label: string; type: string },
+        options: { label: string; type: string; path?: string; record?: boolean },
         mutate: () => Promise<boolean>,
     ): Promise<boolean> {
         if (
+            options.record === false ||
             Service.Undo?.isApplying?.() ||
             Service.Undo?.hasActiveRecording?.(component.node.uuid) ||
             Service.Undo?.hasActiveRecording?.(component.uuid)
@@ -467,7 +592,8 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
             return mutate();
         }
 
-        const before = this._captureComponentSnapshot(component, options.type);
+        const snapshotPath = options.path ?? options.type;
+        const before = this._captureComponentSnapshot(component, snapshotPath);
         const result = await mutate();
         if (!result) {
             return result;
@@ -483,7 +609,7 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
             return result;
         }
 
-        const after = this._captureComponentSnapshot(latestComponent, options.type);
+        const after = this._captureComponentSnapshot(latestComponent, snapshotPath);
         if (this._snapshotMapsEqual(before, after)) {
             return result;
         }
@@ -776,7 +902,7 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
     }
 
     async queryFunctionOfNode(path: string): Promise<any> {
-        const node = NodeMgr.getNodeByPath(path);
+        const node = resolveNodeByPath(path);
         if (!node) {
             return {};
         }
@@ -881,6 +1007,82 @@ export class ComponentService extends BaseService<IComponentEvents> implements I
         } catch (e) {
             console.warn(e);
             return false;
+        }
+    }
+
+    public async recalculateLODGroupBounds(
+        options: IRecalculateLODGroupBoundsOptions,
+    ): Promise<ILODGroupBoundsResult> {
+        const comp = requireLODGroup(await this.findComponent(options.path), options.path);
+
+        const componentIndex = comp.node.components.indexOf(comp);
+        await this._recordComponentSnapshot(comp, {
+            label: 'Recalculate LODGroup Bounds',
+            type: 'component:recalculate-lod-group-bounds',
+            path: componentIndex >= 0 ? `__comps__.${componentIndex}` : undefined,
+            record: options.record,
+        }, async () => {
+            comp.recalculateBounds();
+            return true;
+        });
+
+        return serializeLODGroupBounds(comp);
+    }
+
+    public async insertLOD(options: IInsertLODOptions): Promise<ILODGroupLevelsResult> {
+        const comp = requireLODGroup(await this.findComponent(options.path), options.path);
+        validateLODInsert(comp, options.index, options.screenUsagePercentage);
+
+        const componentIndex = comp.node.components.indexOf(comp);
+        await this._recordComponentSnapshot(comp, {
+            label: 'Insert LOD',
+            type: 'component:insert-lod',
+            path: componentIndex >= 0 ? `__comps__.${componentIndex}` : undefined,
+            record: options.record,
+        }, async () => {
+            comp.insertLOD(options.index, options.screenUsagePercentage);
+            return true;
+        });
+
+        return serializeLODGroupLevels(comp);
+    }
+
+    public async eraseLOD(options: IEraseLODOptions): Promise<ILODGroupLevelsResult> {
+        const comp = requireLODGroup(await this.findComponent(options.path), options.path);
+        validateLODErase(comp, options.index);
+
+        const componentIndex = comp.node.components.indexOf(comp);
+        await this._recordComponentSnapshot(comp, {
+            label: 'Erase LOD',
+            type: 'component:erase-lod',
+            path: componentIndex >= 0 ? `__comps__.${componentIndex}` : undefined,
+            record: options.record,
+        }, async () => {
+            comp.eraseLOD(options.index);
+            return true;
+        });
+
+        return serializeLODGroupLevels(comp);
+    }
+
+    public async queryLODGroupRelativeHeight(
+        options: IQueryLODGroupRelativeHeightOptions,
+    ): Promise<number> {
+        const comp = requireLODGroup(await this.findComponent(options.path), options.path);
+        // ICameraService 仅声明公开能力；场景进程实现额外提供编辑器 Camera 组件。
+        const editorCamera = (Service.Camera as any).getCamera?.();
+        const renderCamera = editorCamera?.camera;
+        if (!renderCamera) {
+            throw new Error('Editor camera is not ready');
+        }
+
+        try {
+            return queryLODGroupRelativeHeight(comp, renderCamera);
+        } catch (error) {
+            if (error instanceof Error) {
+                throw new Error(`${error.message}: ${options.path}`);
+            }
+            throw error;
         }
     }
 

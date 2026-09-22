@@ -135,7 +135,8 @@ export class CameraUtils {
     }
 
     static createGrid(effectName: string, parentNode: Node) {
-        const node = new cc.Node(effectName);
+        // 节点名不允许包含 /\:*?"<>|；effectName 是资源路径（如 'internal/editor/grid-2d'），脱敏后用作节点名
+        const node = new cc.Node(effectName.replace(/[/\\:*?"<>|]/g, '-'));
         node.layer = cc.Layers.Enum.EDITOR | cc.Layers.Enum.IGNORE_RAYCAST;
         node._objFlags |= CCObject.Flags.DontSave;
         node.parent = parentNode;
@@ -328,7 +329,7 @@ export class CameraUtils {
 
         const label = document.createElement('span');
         label.style.cssText = 'color: white; opacity: 0.6; margin-right: 8px; line-height: 56px;';
-        label.textContent = 'Camera Wander';
+        label.textContent = 'Camera Wander:';
         shortcutRow.appendChild(label);
 
         const keyGrid = document.createElement('div');
@@ -382,9 +383,9 @@ export class CameraUtils {
             container.appendChild(row);
         };
 
-        addKeywordRow('Speed', 'Shift', '80px');
-        addKeywordRow('Speed Up', 'Wheel Up', '100%');
-        addKeywordRow('Speed Down', 'Wheel Down', '100%');
+        addKeywordRow('Speed:', 'Shift', '80px');
+        addKeywordRow('Speed Up:', 'Wheel Up', '120px');
+        addKeywordRow('Speed Down:', 'Wheel Down', '120px');
 
         document.body.appendChild(container);
         CameraUtils._wanderTipElement = container;

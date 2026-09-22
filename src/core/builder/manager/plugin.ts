@@ -1,9 +1,9 @@
 import EventEmitter from 'events';
-import { basename, join } from 'path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'path';
 import { checkBuildCommonOptionsByKey, checkBundleCompressionSetting } from '../share/common-options-validator';
 import { NATIVE_PLATFORM, PLATFORMS } from '../share/platforms-options';
 import { validator, validatorManager } from '../share/validator-manager';
-import { checkConfigDefault, defaultMerge, defaultsDeep, getOptionsDefault, resolveToRaw } from '../share/utils';
+import { checkConfigDefault, cloneConfigValue, defaultMerge, defaultsDeep, getOptionsDefault, resolveToRaw } from '../share/utils';
 import { Platform, IDisplayOptions, IBuildTaskOption, IConsoleType, TextureCompressRenderConfig, TextureCompressFullRenderConfig } from '../@types';
 import { IInternalBuildPluginConfig, IPlatformBuildPluginConfig, PlatformBundleConfig, BundleQueryConfig, IBuildStageItem, BuildCheckResult, BuildTemplateConfig, IConfigGroupsInfo, IPlatformConfig, ITextureCompressConfig, IBuildHooksInfo, IBuildCommandOption, MakeRequired, IBuilderConfigItem, IPlatformRegisterInfo, IPluginRegisterInfo, IPackageRegisterInfo, IBuilderRegisterInfo, PlatformBuildSchema, PlatformConfigItem } from '../@types/protected';
 import Utils from '../../base/utils';
@@ -13,13 +13,14 @@ import { configGroups, textureFormatConfigs, formatsInfo, defaultSupport } from 
 import { BundlecompressionTypeMap, BundlePlatformTypes } from '../share/bundle-utils';
 import { newConsole } from '../../base/console';
 import builderConfig from '../share/builder-config';
-import { createBuilderPlatformMetadataNodes } from '../share/metadata';
+import { createBuilderPlatformMetadataNodes, createBuilderRenderSchema } from '../share/metadata';
 import { configurationRegistry } from '../../configuration';
-import { convertConfigItem, ICocosConfigurationPropertySchema } from '../../configuration/script/metadata';
+import type { ICocosConfigurationPropertySchema } from '../../configuration/script/metadata';
 import { GlobalPaths } from '../../../global';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, realpathSync, statSync } from 'fs';
 import utils from '../../base/utils';
 import { copy, outputJSON, readJSON, readJSONSync } from 'fs-extra';
+import { resolveBuiltinExtensionsRoot } from '../../extension-roots';
 
 export interface InternalPackageInfo {
     name: string; // 插件名
@@ -34,6 +35,22 @@ type ICustomAssetHandlerType = 'compressTextures';
 type IAssetHandlers = Record<ICustomAssetHandlerType, Record<string, (...args: unknown[]) => unknown>>;
 // 对外支持的对外公开的资源处理方法汇总
 const CustomAssetHandlerTypes: ICustomAssetHandlerType[] = ['compressTextures'];
+const SUPPORT_PLATFORM_PARENT_OPTION_MAPPINGS = [{
+    childKey: 'appid',
+    parentKeys: ['appid'],
+}, {
+    childKey: 'versionName',
+    parentKeys: ['versionName'],
+}, {
+    childKey: 'uploadEnv',
+    parentKeys: ['uploadEnv'],
+}, {
+    childKey: 'accessToken',
+    parentKeys: ['accessToken'],
+}, {
+    childKey: 'codeVersion',
+    parentKeys: ['codeVersion'],
+}];
 
 type DisplayValueField = 'displayName' | 'label' | 'description';
 type I18nDisplayRecord = Record<string, any>;
@@ -64,6 +81,112 @@ const pluginRoots = [
     join(__dirname, '../platforms'),
     join(GlobalPaths.workspace, 'packages/platforms'),
 ];
+
+interface ExtensionBuilderHook {
+    extensionName: string;
+    path: string;
+    root: string;
+}
+
+interface ExtensionManifest {
+    name?: unknown;
+    contributions?: {
+        builder?: unknown;
+    };
+}
+
+function isPathInsideRoot(root: string, target: string): boolean {
+    const relativeTarget = relative(root, target);
+    return relativeTarget !== ''
+        && relativeTarget !== '..'
+        && !relativeTarget.startsWith(`..${sep}`)
+        && !isAbsolute(relativeTarget);
+}
+
+function scanExtensionBuilderHooks(root: string): ExtensionBuilderHook[] {
+    if (!existsSync(root)) {
+        return [];
+    }
+
+    let entries: import('fs').Dirent[];
+    try {
+        entries = readdirSync(root, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (error) {
+        console.warn(`[Build] Failed to scan builtin extension root ${root}: ${String(error)}`);
+        return [];
+    }
+
+    const result: ExtensionBuilderHook[] = [];
+    for (const entry of entries) {
+        const extensionDir = resolve(root, entry.name);
+        const manifestPath = join(extensionDir, 'package.json');
+        if (!existsSync(manifestPath)) {
+            continue;
+        }
+
+        let manifest: ExtensionManifest;
+        try {
+            manifest = readJSONSync(manifestPath) as ExtensionManifest;
+        } catch (error) {
+            console.warn(`[Build] Skip builtin extension manifest for ${extensionDir}: ${String(error)}`);
+            continue;
+        }
+
+        const declaredBuilder = manifest?.contributions?.builder;
+        if (declaredBuilder === undefined) {
+            continue;
+        }
+        if (typeof declaredBuilder !== 'string' || !declaredBuilder.trim()) {
+            console.warn(`[Build] Skip builtin extension with invalid contributions.builder: extension=${String(manifest?.name)}, root=${root}, directory=${extensionDir}, declaration=${JSON.stringify(declaredBuilder)}`);
+            continue;
+        }
+
+        const extensionName = typeof manifest.name === 'string' ? manifest.name.trim() : '';
+        if (!extensionName) {
+            console.warn(`[Build] Skip builtin extension with invalid manifest.name: root=${root}, directory=${extensionDir}`);
+            continue;
+        }
+
+        const declaredEntry = resolve(extensionDir, declaredBuilder);
+        let extensionRoot: string;
+        let entryPath: string;
+        try {
+            extensionRoot = realpathSync(extensionDir);
+            entryPath = realpathSync(declaredEntry);
+        } catch (error) {
+            console.warn(`[Build] Skip builtin extension builder entry: extension=${extensionName}, root=${root}, directory=${extensionDir}, declaration=${declaredBuilder}, reason=${String(error)}`);
+            continue;
+        }
+
+        const relativeEntry = relative(extensionRoot, entryPath);
+        if (!isPathInsideRoot(extensionRoot, entryPath)) {
+            console.warn(`[Build] Reject builtin extension builder entry outside extension root: extension=${extensionName}, root=${root}, directory=${extensionDir}, declaration=${declaredBuilder}, resolved=${declaredEntry}, relative=${relativeEntry}`);
+            continue;
+        }
+        try {
+            if (!statSync(entryPath).isFile()) {
+                console.warn(`[Build] Reject builtin extension builder entry that is not a regular file: extension=${extensionName}, root=${root}, directory=${extensionDir}, declaration=${declaredBuilder}, resolved=${declaredEntry}`);
+                continue;
+            }
+        } catch (error) {
+            console.warn(`[Build] Skip builtin extension builder entry: extension=${extensionName}, root=${root}, directory=${extensionDir}, declaration=${declaredBuilder}, reason=${String(error)}`);
+            continue;
+        }
+
+        if (result.some((item) => item.extensionName === extensionName)) {
+            console.warn(`[Build] Skip duplicate builtin extension builder hook: extension=${extensionName}, root=${root}, directory=${extensionDir}, declaration=${declaredBuilder}`);
+            continue;
+        }
+        result.push({
+            extensionName,
+            path: declaredEntry,
+            root,
+        });
+    }
+    return result;
+}
 
 function getRegisterInfo(root: string, dirName: string) : IPlatformRegisterInfo | null {
     const packageJSONPath = join(root, 'package.json');
@@ -126,6 +249,9 @@ export class PluginManager extends EventEmitter {
     public configMap: Record<string, Record<string, IInternalBuildPluginConfig>>; // 存储注入进来的 config
     // 存储注册进来的，带有 hooks 的插件路径，[pkgName][platform]: hooks
     private builderPathsMap: Record<string, Record<string, string>> = {};
+    // 仅记录精确的 builtin extension hook slot，避免把同名平台 hook 误判为 extension hook。
+    private extensionBuilderHookSlots: Record<string, Set<string>> = {};
+    private extensionBuilderHooks: ExtensionBuilderHook[] = [];
     private customBuildStagesMap: {
         [pkgName: string]: {
             [platform: string]: IBuildStageItem[];
@@ -168,6 +294,8 @@ export class PluginManager extends EventEmitter {
                 this.platformRegisterInfoPool.set(info.platform, info);
             }
         }
+        const builtinExtensionsRoot = resolveBuiltinExtensionsRoot();
+        this.extensionBuilderHooks = builtinExtensionsRoot ? this.scanBuiltinExtensionBuilderHooks(builtinExtensionsRoot) : [];
         this.translateConfigItemsDisplayFields(builderConfig.commonOptionConfigs);
     }
 
@@ -193,7 +321,34 @@ export class PluginManager extends EventEmitter {
         }
         await this.registerPlatform(info);
         await this.internalRegister(info);
+        this.registerExtensionBuilderHooks(platform);
         console.log(`register platform ${platform} success!`);
+    }
+
+    private registerExtensionBuilderHooks(platform: string): void {
+        if (!this.extensionBuilderHooks.length) {
+            return;
+        }
+        const platformPaths = this.builderPathsMap[platform] || (this.builderPathsMap[platform] = {});
+        const extensionSlots = this.extensionBuilderHookSlots[platform] || (this.extensionBuilderHookSlots[platform] = new Set<string>());
+        for (const extensionHook of this.extensionBuilderHooks) {
+            const { extensionName, path } = extensionHook;
+            if (this.platformConfig[extensionName] || this.platformRegisterInfoPool.has(extensionName)) {
+                console.warn(`[Build] Skip builtin extension builder hook with platform name conflict: extension=${extensionName}, platform=${platform}`);
+                continue;
+            }
+            if (Object.prototype.hasOwnProperty.call(platformPaths, extensionName)) {
+                console.warn(`[Build] Skip builtin extension builder hook because the platform hook slot is occupied: extension=${extensionName}, platform=${platform}`);
+                continue;
+            }
+            platformPaths[extensionName] = path;
+            extensionSlots.add(extensionName);
+            this.pkgPriorities[extensionName] = 0;
+        }
+    }
+
+    private scanBuiltinExtensionBuilderHooks(root: string): ExtensionBuilderHook[] {
+        return scanExtensionBuilderHooks(root);
     }
 
     public checkPlatform(platform: string) {
@@ -546,7 +701,13 @@ export class PluginManager extends EventEmitter {
         } else {
             console.debug(`Can not find bundle config with platform ${options.platform}`);
         }
-
+        if (options.packages) {
+            // 处理 packages 相关的校验逻辑
+            const result = await this.checkPluginOptions(options as IBuildTaskOption);
+            if (!result) {
+                return;
+            }
+        }
         // (校验处已经做了错误数据使用默认值的处理)检验数据通过后做一次数据融合
         const defaultOptions = await this.getOptionsByPlatform(options.platform);
         // lodash 的 defaultsDeep 会对数组也进行深度合并，不符合我们的使用预期，需要自己编写该函数
@@ -555,6 +716,7 @@ export class PluginManager extends EventEmitter {
         if ('buildStageGroup' in options) {
             rightOptions.buildStageGroup = options.buildStageGroup;
         }
+        await this.completeSupportPlatformOptions(rightOptions);
         // 通用参数的构建校验, 需要使用默认值补全所有的 key
         for (const key of Object.keys(rightOptions)) {
             if (key === 'packages') {
@@ -585,12 +747,89 @@ export class PluginManager extends EventEmitter {
             }
             rightOptions[key] = fixedValue;
         }
-        const result = await this.checkPluginOptions(rightOptions);
-        if (!result) {
-            checkRes = false;
-        }
         if (checkRes) {
             return rightOptions;
+        }
+    }
+
+    private getPlatformBuildPluginConfig(platform: Platform | string): IPlatformBuildPluginConfig | undefined {
+        return (this.configMap[platform]?.[platform] || this.platformRegisterInfoPool.get(platform)?.config) as IPlatformBuildPluginConfig | undefined;
+    }
+
+    private async ensurePlatformRegistered(platform: string) {
+        if (this.checkPlatform(platform)) {
+            return;
+        }
+        if (!this.platformRegisterInfoPool.has(platform)) {
+            throw new Error(`Support platform ${platform} is not registered`);
+        }
+        await this.register(platform);
+    }
+
+    /**
+     * Complete child platform build options for platforms that support combined builds.
+     *
+     * When the parent platform enables `supportPlatforms`, this method:
+     * - registers and enables configured child platforms;
+     * - merges each child platform's own default package options;
+     * - synchronizes parent OpenPaaS upload identity fields into child packages
+     *   so web upload stages use the same app/version/environment/session.
+     */
+    private async completeSupportPlatformOptions(options: IBuildTaskOption) {
+        const platform = String(options.platform);
+        const config = this.getPlatformBuildPluginConfig(platform);
+        const supportPlatforms = config?.supportPlatforms;
+        if (!supportPlatforms?.platforms?.length) {
+            delete options.subTaskPlatforms;
+            delete options.subTaskBuildOutputs;
+            delete options.childTaskIds;
+            return;
+        }
+
+        const enabled = !!lodash.get(options, ['packages', platform, supportPlatforms.controlledBy]);
+        if (!enabled) {
+            delete options.subTaskPlatforms;
+            delete options.subTaskBuildOutputs;
+            delete options.childTaskIds;
+            return;
+        }
+
+        options.packages = options.packages || {};
+        const parentPackageOptions = options.packages[platform] || {};
+        options.subTaskPlatforms = [];
+        delete options.subTaskBuildOutputs;
+        delete options.childTaskIds;
+
+        for (const childPlatform of supportPlatforms.platforms) {
+            await this.ensurePlatformRegistered(childPlatform);
+            const childDefaultOptions = await this.getOptionsByPlatform(childPlatform);
+            const childPackageDefaults = lodash.get(childDefaultOptions, ['packages', childPlatform], {});
+            const childPackageOptions = defaultsDeep(
+                cloneConfigValue(options.packages[childPlatform] || {}),
+                cloneConfigValue(childPackageDefaults),
+            );
+            this.syncParentOptionsToSupportPlatformPackage(parentPackageOptions, childPackageOptions);
+            options.packages[childPlatform] = childPackageOptions;
+            options.subTaskPlatforms.push(childPlatform);
+        }
+    }
+
+    /**
+     * Copy parent OpenPaaS upload fields to a support-platform package.
+     *
+     * OpenPaaS and web packages both consume `appid`. `app_id` is accepted as a
+     * legacy parent key for compatibility. The remaining fields share the same
+     * key names and must stay aligned across parent and child builds for web
+     * package upload.
+     */
+    private syncParentOptionsToSupportPlatformPackage(parentPackageOptions: Record<string, any>, childPackageOptions: Record<string, any>) {
+        for (const { childKey, parentKeys } of SUPPORT_PLATFORM_PARENT_OPTION_MAPPINGS) {
+            for (const parentKey of parentKeys) {
+                if (Object.prototype.hasOwnProperty.call(parentPackageOptions, parentKey) && parentPackageOptions[parentKey] !== undefined) {
+                    childPackageOptions[childKey] = cloneConfigValue(parentPackageOptions[parentKey]);
+                    break;
+                }
+            }
         }
     }
 
@@ -789,6 +1028,7 @@ export class PluginManager extends EventEmitter {
                     checkRes = false;
                     continue;
                 } else {
+                    if (verifyLevel === 'error') checkRes = false;
                     const consoleType = (verifyLevel !== 'error' && newConsole[verifyLevel]) ? verifyLevel : 'warn';
                     // 有报错信息，但有默认值，报错后填充默认值
                     newConsole[consoleType](i18n.t('builder.warn.check_failed_with_new_value', {
@@ -815,11 +1055,11 @@ export class PluginManager extends EventEmitter {
      * @param platform
      */
     public async getOptionsByPlatform<P extends Platform | string>(platform: P): Promise<IBuildTaskOption> {
-        const options = await builderConfig.getProject<IBuildTaskOption>(`platforms.${platform}`);
-        const commonOptions = await builderConfig.getProject<IBuildCommandOption>(`common`);
+        const options = cloneConfigValue(await builderConfig.getProject<IBuildTaskOption>(`platforms.${platform}`));
+        const commonOptions = cloneConfigValue(await builderConfig.getProject<IBuildCommandOption>(`common`));
         commonOptions.platform = platform;
         commonOptions.outputName = platform;
-        return Object.assign(commonOptions, options);
+        return Object.assign({}, commonOptions, options);
     }
 
     public getTexturePlatformConfigs(): Record<string, ITextureCompressConfig> {
@@ -868,6 +1108,7 @@ export class PluginManager extends EventEmitter {
     private collectPlatformConfigItems(platform: Platform | string): {
         common: Record<string, IBuilderConfigItem>;
         platformOptions: Record<string, IBuilderConfigItem>;
+        supportPlatforms?: IPlatformBuildPluginConfig['supportPlatforms'];
     } {
         const common: Record<string, IBuilderConfigItem> = {};
         const platformCommonOptions = this.commonOptionConfig[platform] || {};
@@ -882,36 +1123,12 @@ export class PluginManager extends EventEmitter {
         // 应用支持的压缩类型
         this.applySupportedCompressionTypes(platform, common);
 
-        const config = this.configMap[platform]?.[platform] || this.platformRegisterInfoPool.get(platform)?.config;
+        const config = (this.configMap[platform]?.[platform] || this.platformRegisterInfoPool.get(platform)?.config) as IPlatformBuildPluginConfig | undefined;
         return {
             common,
             platformOptions: this.cloneDisplayOptions(config?.options),
+            supportPlatforms: lodash.cloneDeep(config?.supportPlatforms),
         };
-    }
-
-    /**
-     * 把 IBuilderConfigItem 映射成配置系统 schema(ICocosConfigurationPropertySchema)。
-     * 复用配置系统的 convertConfigItem(label->title、type:'enum'->string|number+enum、对象/数组递归、i18n 翻译)。
-     * hidden 项直接过滤(配置系统 schema 无 hidden 字段;如 md5CacheOptions 不渲染,其值仍随构建参数透传)。
-     */
-    private toRenderSchema(items: Record<string, IBuilderConfigItem>): ICocosConfigurationPropertySchema {
-        const properties: Record<string, ICocosConfigurationPropertySchema> = {};
-        const required: string[] = [];
-        for (const [key, item] of Object.entries(items)) {
-            if (!item || item.hidden) {
-                continue;
-            }
-            properties[key] = convertConfigItem(item, key);
-            // 必填:从 verifyRules:['required'] 派生,收进父对象节点的 required(JSON Schema 对象级);拦构建仍由 checkBuildOption 负责
-            if (item.verifyRules?.includes('required')) {
-                required.push(key);
-            }
-        }
-        const node: ICocosConfigurationPropertySchema = { type: 'object', properties };
-        if (required.length) {
-            node.required = required;
-        }
-        return node;
     }
 
     public getPlatformBuildSchema(platform: Platform | string): PlatformBuildSchema {
@@ -919,10 +1136,11 @@ export class PluginManager extends EventEmitter {
             throw new Error(`Can not find platform config for ${platform}`);
         }
 
-        const { common, platformOptions } = this.collectPlatformConfigItems(platform);
+        const { common, platformOptions, supportPlatforms } = this.collectPlatformConfigItems(platform);
         return {
-            common: this.toRenderSchema(common),
-            platformOptions: this.toRenderSchema(platformOptions),
+            common: createBuilderRenderSchema(common, String(platform)),
+            platformOptions: createBuilderRenderSchema(platformOptions, String(platform)),
+            supportPlatforms,
         };
     }
 
@@ -1098,10 +1316,14 @@ export class PluginManager extends EventEmitter {
             pkgNameOrder: [],
             infos: {},
         };
-        Object.keys(this.builderPathsMap[platform]).forEach((pkgName) => {
+        const platformPaths = this.builderPathsMap[platform] || {};
+        const extensionSlots = this.extensionBuilderHookSlots[platform];
+        Object.keys(platformPaths).forEach((pkgName) => {
+            const isExtensionHook = !!extensionSlots?.has(pkgName);
+            const internal = isExtensionHook || pkgName === platform;
             result.infos[pkgName] = {
-                path: this.builderPathsMap[platform][pkgName],
-                internal: pkgName === platform,
+                path: platformPaths[pkgName],
+                internal,
             };
         });
         result.pkgNameOrder = this.sortPkgNameWidthPriority(Object.keys(result.infos));

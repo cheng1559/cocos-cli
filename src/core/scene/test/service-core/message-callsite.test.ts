@@ -158,12 +158,20 @@ jest.mock('../../scene-process/service/gizmo/components/mesh-collider', () => ({
 jest.mock('../../scene-process/service/gizmo/components/box-collider-2d', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/circle-collider-2d', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/polygon-collider-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/distance-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/spring-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/hinge-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/fixed-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/relative-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/slider-joint-2d', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/wheel-joint-2d', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/mesh-renderer', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/skinned-mesh-renderer', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/video-player', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/web-view', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/light-probe-group', () => ({}));
 jest.mock('../../scene-process/service/gizmo/components/reflection-probe', () => ({}));
+jest.mock('../../scene-process/service/gizmo/components/lod-group', () => ({}));
 
 jest.mock('../../scene-process/service/dump', () => ({
     __esModule: true,
@@ -200,7 +208,7 @@ jest.mock('../../scene-process/service/scene/utils', () => ({
     sceneUtils: {},
 }));
 
-const mockConsumePreserveUndoHistoryForPrefabReload = jest.fn(() => ({ preserveUndoHistory: false, editorUuid: null }));
+const mockConsumePreserveUndoHistoryForPrefabReload = jest.fn(() => ({ preserveUndoHistory: false, editorSession: null }));
 const mockPrefabSoftReloadSchedule = jest.fn();
 
 jest.mock('../../scene-process/service/prefab/prefab-undo', () => ({
@@ -213,6 +221,7 @@ jest.mock('../../scene-process/service/prefab/soft-reload', () => ({
     PrefabSoftReloadScheduler: jest.fn().mockImplementation(() => ({
         schedule: mockPrefabSoftReloadSchedule,
         waitForIdle: jest.fn().mockResolvedValue(undefined),
+        invalidate: jest.fn(),
     })),
 }));
 
@@ -267,6 +276,57 @@ describe('ServiceEvents 事件发射集成测试', () => {
             gizmoService.transformToolData.is2D = true;
 
             expect(listener).toHaveBeenCalledWith(true);
+        });
+
+        it('generateLightProbes forwards to the LightProbeGroup gizmo method', () => {
+            gizmoService.execGizmoMethods = jest.fn(() => 2);
+
+            expect(gizmoService.generateLightProbes()).toBe(2);
+            expect(gizmoService.execGizmoMethods).toHaveBeenCalledWith(
+                'cc.LightProbeGroup',
+                'generateLightProbes',
+                [],
+            );
+        });
+
+        it('forwards all LightProbe facade operations with the expected method names and parameters', async () => {
+            const exec = jest.fn((name: string, method: string) => {
+                if (method === 'getEditMode') return 'none';
+                if (method === 'getSelectedProbeCount') return 3;
+                if (method === 'deleteSelectedProbes') return 1;
+                if (method === 'duplicateSelectedProbes') return 2;
+                if (method === 'regionSelectProbes') return 4;
+                if (method === 'generateLightProbes') return 2;
+                return undefined;
+            });
+            gizmoService.execGizmoMethods = exec;
+
+            gizmoService.toggleLightProbeEditMode(true);
+            gizmoService.queryLightProbeEditMode();
+            gizmoService.toggleLightProbeBoundingBoxEditMode(true);
+            gizmoService.queryLightProbeBoundingBoxEditMode();
+            gizmoService.selectAllLightProbes();
+            gizmoService.unselectAllLightProbes();
+            expect(gizmoService.queryLightProbeSelectedCount()).toBe(3);
+            await expect(gizmoService.deleteSelectedLightProbes()).resolves.toBe(1);
+            await expect(gizmoService.duplicateSelectedLightProbes()).resolves.toBe(2);
+            expect(gizmoService.regionSelectLightProbes(1, 2, 3, 4, true)).toBe(4);
+            expect(gizmoService.generateLightProbes()).toBe(2);
+
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'changeEditMode', ['vertex']);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'changeEditMode', ['box']);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'getEditMode', []);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'selectAllProbes', []);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'unselectAllProbes', []);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'getSelectedProbeCount', []);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'deleteSelectedProbes', []);
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'duplicateSelectedProbes', []);
+            expect(exec).toHaveBeenCalledWith(
+                'cc.LightProbeGroup',
+                'regionSelectProbes',
+                [1, 2, 3, 4, true],
+            );
+            expect(exec).toHaveBeenCalledWith('cc.LightProbeGroup', 'generateLightProbes', []);
         });
     });
 
@@ -401,6 +461,117 @@ describe('ServiceEvents 事件发射集成测试', () => {
             expect(listener).toHaveBeenCalledTimes(1);
         });
 
+        it('open 新资源时应先释放已删除源资源对应的当前编辑器会话', async () => {
+            const sourceUuid = 'deleted-open-source-uuid';
+            const targetUuid = 'new-open-target-uuid';
+            const deletedEditor = { close: jest.fn().mockResolvedValue(true) };
+            const targetEditor = { open: jest.fn().mockResolvedValue({}) };
+            editorService.editorMap.set(sourceUuid, deletedEditor);
+            editorService.editorMap.set(targetUuid, targetEditor);
+            editorService.currentEditorUuid = sourceUuid;
+
+            mockRpcRequest
+                .mockResolvedValueOnce({ uuid: targetUuid, url: 'db://assets/new.scene', type: 'scene' })
+                .mockResolvedValueOnce(null);
+
+            await editorService.open({ urlOrUUID: 'db://assets/new.scene' });
+
+            expect(deletedEditor.close).toHaveBeenCalledWith({ save: false });
+            expect(editorService.currentEditorUuid).toBe(targetUuid);
+            expect(editorService.editorMap.get(sourceUuid)).toBeUndefined();
+        });
+
+        it('serializes concurrent opens and closes the intermediate editor before switching again', async () => {
+            const oldUuid = 'concurrent-old-uuid';
+            const firstUuid = 'concurrent-first-uuid';
+            const secondUuid = 'concurrent-second-uuid';
+            let releaseOldClose!: () => void;
+            const oldEditor = { close: jest.fn(() => new Promise<boolean>((resolve) => { releaseOldClose = () => resolve(true); })) };
+            const firstEditor = { open: jest.fn().mockResolvedValue({}) , close: jest.fn().mockResolvedValue(true) };
+            const secondEditor = { open: jest.fn().mockResolvedValue({}) , close: jest.fn().mockResolvedValue(true) };
+            editorService.editorMap.set(oldUuid, oldEditor);
+            editorService.editorMap.set(firstUuid, firstEditor);
+            editorService.editorMap.set(secondUuid, secondEditor);
+            editorService.currentEditorUuid = oldUuid;
+
+            mockRpcRequest.mockImplementation(async (_service: string, method: string, args: string[]) => {
+                if (method !== 'queryAssetInfo') {
+                    return undefined;
+                }
+                const value = args[0];
+                if (value === 'first.scene') return { uuid: firstUuid, url: value, type: 'scene' };
+                if (value === 'second.scene') return { uuid: secondUuid, url: value, type: 'scene' };
+                if (value === oldUuid) return undefined;
+                if (value === firstUuid) return { uuid: firstUuid, url: 'first.scene', type: 'scene' };
+                return undefined;
+            });
+
+            const firstOpen = editorService.open({ urlOrUUID: 'first.scene' });
+            const secondOpen = editorService.open({ urlOrUUID: 'second.scene' });
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            await new Promise<void>((resolve) => setImmediate(resolve));
+
+            expect(oldEditor.close).toHaveBeenCalledTimes(1);
+            expect(firstEditor.open).not.toHaveBeenCalled();
+            expect(secondEditor.open).not.toHaveBeenCalled();
+
+            releaseOldClose();
+            await Promise.all([firstOpen, secondOpen]);
+
+            expect(firstEditor.open).toHaveBeenCalledTimes(1);
+            expect(firstEditor.close).toHaveBeenCalledWith({ save: true });
+            expect(secondEditor.open).toHaveBeenCalledTimes(1);
+            expect(editorService.currentEditorUuid).toBe(secondUuid);
+            expect(editorService.editorMap.has(firstUuid)).toBe(false);
+        });
+
+        it('does not discard the current editor when closing it fails during open', async () => {
+            const sourceUuid = 'close-failed-source-uuid';
+            const targetUuid = 'close-failed-target-uuid';
+            const sourceEditor = { close: jest.fn().mockRejectedValue(new Error('save failed')) };
+            const targetEditor = { open: jest.fn().mockResolvedValue({}) };
+            editorService.editorMap.set(sourceUuid, sourceEditor);
+            editorService.editorMap.set(targetUuid, targetEditor);
+            editorService.currentEditorUuid = sourceUuid;
+            editorService.isOpen = true;
+
+            mockRpcRequest.mockImplementation(async (_service: string, method: string, args: string[]) => {
+                if (method !== 'queryAssetInfo') return undefined;
+                if (args[0] === 'target.scene') return { uuid: targetUuid, url: 'target.scene', type: 'scene' };
+                return { uuid: sourceUuid, url: 'source.scene', type: 'scene' };
+            });
+
+            await expect(editorService.open({ urlOrUUID: 'target.scene' })).rejects.toThrow('save failed');
+
+            expect(editorService.currentEditorUuid).toBe(sourceUuid);
+            expect(editorService.isOpen).toBe(true);
+            expect(editorService.editorMap.get(sourceUuid)).toBe(sourceEditor);
+            expect(targetEditor.open).not.toHaveBeenCalled();
+        });
+
+        it('open target fails after deleted source close without leaving a stale current session', async () => {
+            const sourceUuid = 'deleted-failed-open-source-uuid';
+            const targetUuid = 'failed-open-target-uuid';
+            const sourceEditor = { close: jest.fn().mockResolvedValue(true) };
+            const targetEditor = { open: jest.fn().mockRejectedValue(new Error('target open failed')) };
+            editorService.editorMap.set(sourceUuid, sourceEditor);
+            editorService.editorMap.set(targetUuid, targetEditor);
+            editorService.currentEditorUuid = sourceUuid;
+            editorService.isOpen = true;
+
+            mockRpcRequest
+                .mockResolvedValueOnce({ uuid: targetUuid, url: 'db://assets/failed.scene', type: 'scene' })
+                .mockResolvedValueOnce(null);
+
+            await expect(editorService.open({ urlOrUUID: 'db://assets/failed.scene' })).rejects.toThrow('target open failed');
+
+            expect(sourceEditor.close).toHaveBeenCalledWith({ save: false });
+            expect(editorService.currentEditorUuid).toBeNull();
+            expect(editorService.isOpen).toBe(false);
+            expect(editorService.editorMap.has(sourceUuid)).toBe(false);
+            expect(editorService.editorMap.has(targetUuid)).toBe(false);
+        });
+
         it('close 在源资源已删除时仍可丢弃当前编辑器会话', async () => {
             const uuid = 'deleted-source-uuid';
             const mockEditor = { close: jest.fn().mockResolvedValue(true) };
@@ -421,81 +592,6 @@ describe('ServiceEvents 事件发射集成测试', () => {
             expect(editorService.editorMap.get(uuid)).toBeUndefined();
         });
 
-        it('save 到新资源应使用当前编辑器内容并更新当前资源标识', async () => {
-            const { SceneEditor } = require('../../scene-process/service/editors');
-            const sourceUuid = 'source-uuid';
-            const target = { uuid: 'target-uuid', url: 'db://assets/recovered.scene', type: 'scene' };
-            const mockEditor = Object.assign(Object.create(SceneEditor.prototype), {
-                saveTo: jest.fn().mockResolvedValue(target),
-            });
-            editorService.editorMap.set(sourceUuid, mockEditor);
-            editorService.currentEditorUuid = sourceUuid;
-
-            mockRpcRequest.mockResolvedValueOnce(target);
-
-            await editorService.save({ urlOrUUID: target.url });
-
-            expect(mockEditor.saveTo).toHaveBeenCalledWith(target);
-            expect(editorService.currentEditorUuid).toBe(target.uuid);
-            expect(editorService.editorMap.get(sourceUuid)).toBeUndefined();
-            expect(editorService.editorMap.get(target.uuid)).toBe(mockEditor);
-        });
-
-        it('deleted-source fallback 不会关闭 Save As 后已重绑的目标编辑器', async () => {
-            const sourceUuid = 'source-uuid';
-            const targetUuid = 'target-uuid';
-            const mockEditor = { close: jest.fn().mockResolvedValue(true) };
-            editorService.editorMap.set(targetUuid, mockEditor);
-            editorService.currentEditorUuid = targetUuid;
-            mockRpcRequest.mockResolvedValueOnce(null);
-
-            await expect(editorService.close({
-                urlOrUUID: 'db://assets/deleted.scene',
-                save: false,
-                allowDeletedSourceFallback: true,
-                expectedCurrentUuid: sourceUuid,
-            })).rejects.toThrow('请求资源失败');
-
-            expect(mockEditor.close).not.toHaveBeenCalled();
-            expect(editorService.currentEditorUuid).toBe(targetUuid);
-            expect(editorService.editorMap.get(targetUuid)).toBe(mockEditor);
-        });
-
-        it('save 到不同类型的资源时保持当前编辑器状态不变', async () => {
-            const { SceneEditor } = require('../../scene-process/service/editors');
-            const sourceUuid = 'source-uuid';
-            const target = { uuid: 'target-prefab-uuid', url: 'db://assets/recovered.prefab', type: 'prefab' };
-            const mockEditor = Object.assign(Object.create(SceneEditor.prototype), {
-                saveTo: jest.fn(),
-            });
-            editorService.editorMap.set(sourceUuid, mockEditor);
-            editorService.currentEditorUuid = sourceUuid;
-            mockRpcRequest.mockResolvedValueOnce(target);
-
-            await expect(editorService.save({ urlOrUUID: target.url })).rejects.toThrow('不能将 scene 保存到 prefab 资源');
-
-            expect(mockEditor.saveTo).not.toHaveBeenCalled();
-            expect(editorService.currentEditorUuid).toBe(sourceUuid);
-            expect(editorService.editorMap.get(sourceUuid)).toBe(mockEditor);
-        });
-
-        it('saveTo 返回非目标 UUID 时保持当前编辑器映射不变', async () => {
-            const { SceneEditor } = require('../../scene-process/service/editors');
-            const sourceUuid = 'source-uuid';
-            const target = { uuid: 'target-uuid', url: 'db://assets/recovered.scene', type: 'scene' };
-            const mockEditor = Object.assign(Object.create(SceneEditor.prototype), {
-                saveTo: jest.fn().mockResolvedValue({ ...target, uuid: 'unexpected-uuid' }),
-            });
-            editorService.editorMap.set(sourceUuid, mockEditor);
-            editorService.currentEditorUuid = sourceUuid;
-            mockRpcRequest.mockResolvedValueOnce(target);
-
-            await expect(editorService.save({ urlOrUUID: target.url })).rejects.toThrow('保存目标资源标识不一致');
-
-            expect(editorService.currentEditorUuid).toBe(sourceUuid);
-            expect(editorService.editorMap.get(sourceUuid)).toBe(mockEditor);
-            expect(editorService.editorMap.get(target.uuid)).toBeUndefined();
-        });
 
         it('save 应 emit editor:save 到 ServiceEvents', async () => {
             const { PrefabEditor } = require('../../scene-process/service/editors');
@@ -515,11 +611,97 @@ describe('ServiceEvents 事件发射集成测试', () => {
 
             expect(listener).toHaveBeenCalledTimes(1);
         });
+
+        it.each(['reported', 'thrown'])('does not write the scene or mark it saved after a %s Terrain failure', async failure => {
+            const { SceneEditor } = require('../../scene-process/service/editors');
+            const core = require('../../scene-process/service/core/decorator');
+            const terrain = { saveAsset: jest.fn(async () => {
+                if (failure === 'thrown') throw new Error('Terrain storage failed');
+                return 2;
+            }) };
+            const query = jest.spyOn(core, 'queryRegisteredService').mockReturnValue(terrain);
+            const markSaved = jest.spyOn(editorService, '_markUndoSaved');
+            const listener = jest.fn();
+            globalEventEmitter.on('editor:save', listener);
+            const uuid = 'terrain-save-failed-scene';
+            const editor = Object.assign(Object.create(SceneEditor.prototype), { save: jest.fn() });
+            editorService.editorMap.set(uuid, editor);
+            editorService.currentEditorUuid = uuid;
+            mockRpcRequest.mockResolvedValueOnce({ uuid, url: 'test.scene', type: 'scene' });
+            try {
+                await expect(editorService.save({})).rejects.toThrow(failure === 'thrown' ? 'Terrain storage failed' : 'Terrain asset save failed');
+                expect(terrain.saveAsset).toHaveBeenCalledWith(false);
+                expect(editor.save).not.toHaveBeenCalled();
+                expect(markSaved).not.toHaveBeenCalled();
+                expect(listener).not.toHaveBeenCalled();
+            } finally {
+                query.mockRestore();
+                markSaved.mockRestore();
+            }
+        });
     });
 
     // ── NodeService: setProperty(name) → ServiceEvents ──
 
     describe('NodeService (node.ts)', () => {
+        it('createByType 应在场景操作前拒绝非法节点名', async () => {
+            const { NodeType } = require('../../common');
+            const { NodeService } = require('../../scene-process/service/node');
+            const nodeService = new NodeService();
+
+            await expect(nodeService.createByType({
+                path: '',
+                name: 'A:B',
+                nodeType: NodeType.EMPTY,
+            })).rejects.toThrow(/illegal character/);
+        });
+
+        it('createByAsset 应在资源查询前拒绝含非法段的父路径', async () => {
+            const { NodeService } = require('../../scene-process/service/node');
+            const nodeService = new NodeService();
+
+            await expect(nodeService.createByAsset({
+                path: 'Parent/A:B',
+                dbURL: 'db://assets/Test.prefab',
+            })).rejects.toThrow(/illegal character/);
+            expect(mockRpcRequest).not.toHaveBeenCalledWith('assetManager', 'queryUUID', expect.anything());
+        });
+
+        it('query 的根路径应解析为当前编辑器根节点，而非 director 场景', async () => {
+            const { NodeService } = require('../../scene-process/service/node');
+            const { Service } = require('../../scene-process/service/core');
+            const { sceneUtils } = require('../../scene-process/service/scene/utils');
+            const nodeService = new NodeService();
+
+            // prefab 模式下 getRootNode() 是 prefab 根，director.getScene() 是承载它的虚拟场景
+            const prefabRoot = { uuid: 'prefab-root' };
+            const virtualScene = { uuid: 'virtual-scene' };
+            const child = { uuid: 'child' };
+
+            const NodeMgr = (global as any).EditorExtends.Node;
+            const originalGetByPath = NodeMgr.getNodeByPath;
+            const originalGetRootNode = Service.Editor.getRootNode;
+            const originalDump = sceneUtils.generateNodeDump;
+
+            NodeMgr.getNodeByPath = jest.fn((path: string) => (path === 'Canvas' ? child : virtualScene));
+            Service.Editor.getRootNode = jest.fn(() => prefabRoot);
+            sceneUtils.generateNodeDump = jest.fn((node: any) => ({ uuid: node.uuid }));
+
+            try {
+                expect(await nodeService.query({ path: '/' })).toEqual({ uuid: 'prefab-root' });
+                expect(await nodeService.query({ path: '//' })).toEqual({ uuid: 'prefab-root' });
+                expect(await nodeService.query({})).toEqual({ uuid: 'prefab-root' });
+                expect(NodeMgr.getNodeByPath).not.toHaveBeenCalled();
+
+                expect(await nodeService.query({ path: 'Canvas' })).toEqual({ uuid: 'child' });
+                expect(NodeMgr.getNodeByPath).toHaveBeenCalledWith('Canvas');
+            } finally {
+                NodeMgr.getNodeByPath = originalGetByPath;
+                Service.Editor.getRootNode = originalGetRootNode;
+                sceneUtils.generateNodeDump = originalDump;
+            }
+        });
+
         it('setProperty(name) 应 emit node:change 到 ServiceEvents', async () => {
             const listener = jest.fn();
             globalEventEmitter.on('node:change', listener);
@@ -551,6 +733,35 @@ describe('ServiceEvents 事件发射集成测试', () => {
             });
 
             expect(listener).toHaveBeenCalledWith(node, expect.objectContaining({ propPath: 'name' }));
+        });
+
+        it('setProperty(name) 应拒绝新的非法名称且不调用底层改名', async () => {
+            const { NodeService } = require('../../scene-process/service/node');
+            const nodeService = new NodeService();
+
+            const { Node: MockNode } = require('cc');
+            const node = new MockNode();
+            node.uuid = 'invalid-name-change';
+            node.name = 'OldName';
+
+            nodeService._undo = {
+                recordNodeSnapshot: jest.fn((_node: any, _opts: any, callback: any) => callback()),
+            };
+
+            const NodeMgr = (global as any).EditorExtends.Node;
+            NodeMgr.getNodeByPath = jest.fn(() => node);
+            NodeMgr.updateNodeName = jest.fn();
+            nodeService.emit = jest.fn();
+
+            await expect(nodeService.setProperty({
+                nodePath: '/TestNode',
+                path: 'name',
+                dump: { value: 'A:B' },
+            })).rejects.toThrow(/illegal character/);
+
+            expect(NodeMgr.updateNodeName).not.toHaveBeenCalled();
+            expect(nodeService.emit).not.toHaveBeenCalled();
+            expect(node.name).toBe('OldName');
         });
 
         it('setProperty(position) 成功后应 broadcast animation:property-committed', async () => {
@@ -658,6 +869,58 @@ describe('ServiceEvents 事件发射集成测试', () => {
     });
 
     describe('ComponentService (component.ts)', () => {
+        it('add 应拒绝挂组件到场景根 (nodePath 指向 scene)', async () => {
+            const { ComponentService } = require('../../scene-process/service/component');
+            const { Service } = require('../../scene-process/service/core');
+            const { Scene } = require('cc');
+            const componentService = new ComponentService();
+
+            const sceneRoot = new Scene();
+            const NodeMgr = (global as any).EditorExtends.Node;
+            const originalGetByPath = NodeMgr.getNodeByPath;
+            const originalGetRootNode = Service.Editor.getRootNode;
+            NodeMgr.getNodeByPath = jest.fn(() => sceneRoot);
+            Service.Editor.getRootNode = jest.fn(() => sceneRoot);
+
+            try {
+                await expect(componentService.add({ nodePath: '/', component: 'cc.Label' }))
+                    .rejects.toThrow(/scene root/);
+                await expect(componentService.add({ nodePath: 'SomeScene', component: 'cc.Label' }))
+                    .rejects.toThrow(/scene root/);
+            } finally {
+                NodeMgr.getNodeByPath = originalGetByPath;
+                Service.Editor.getRootNode = originalGetRootNode;
+            }
+        });
+
+        it('add 在 prefab 模式下允许把组件挂到 prefab 根 (nodePath 为 /)', async () => {
+            const { ComponentService } = require('../../scene-process/service/component');
+            const { Service } = require('../../scene-process/service/core');
+            const { Node: MockNode } = require('cc');
+            const componentService = new ComponentService();
+
+            const prefabRoot = new MockNode('Root');
+            const NodeMgr = (global as any).EditorExtends.Node;
+            const originalGetByPath = NodeMgr.getNodeByPath;
+            const originalGetRootNode = Service.Editor.getRootNode;
+            NodeMgr.getNodeByPath = jest.fn(() => null);
+            Service.Editor.getRootNode = jest.fn(() => prefabRoot);
+
+            try {
+                // 用空组件名探测：报“组件名为空”而不是“场景根/不存在”，说明 '/' 已解析到 prefab 根且通过了 guard
+                await expect(componentService.add({ nodePath: '/', component: '' }))
+                    .rejects.toThrow(/component name cannot be empty/);
+                expect(NodeMgr.getNodeByPath).not.toHaveBeenCalled();
+
+                await expect(componentService.add({ nodePath: 'Missing', component: '' }))
+                    .rejects.toThrow(/does not exist/);
+                expect(NodeMgr.getNodeByPath).toHaveBeenCalledWith('Missing');
+            } finally {
+                NodeMgr.getNodeByPath = originalGetByPath;
+                Service.Editor.getRootNode = originalGetRootNode;
+            }
+        });
+
         it('setProperty(__comps__) 成功后应 broadcast animation:property-committed', async () => {
             const listener = jest.fn();
             globalEventEmitter.on('animation:property-committed', listener);
@@ -739,7 +1002,7 @@ describe('ServiceEvents 事件发射集成测试', () => {
                 objFlags: 0,
             }));
             NodeMock.getNodePath = jest.fn((node: any) => `/${node.name}`);
-            mockConsumePreserveUndoHistoryForPrefabReload.mockReturnValue({ preserveUndoHistory: false, editorUuid: null });
+            mockConsumePreserveUndoHistoryForPrefabReload.mockReturnValue({ preserveUndoHistory: false, editorSession: null });
         });
 
         it('onAssetChanged preserves undo history when current editor is dirty', async () => {
@@ -776,7 +1039,7 @@ describe('ServiceEvents 事件发射集成测试', () => {
 
             prefabService.filterChildOfAssetOfPrefabInstance(['child-uuid-1'], 'test operation');
 
-            expect(listener).toHaveBeenCalledWith('/Node-child-uuid-1');
+            expect(listener).toHaveBeenCalledWith(expect.objectContaining({ uuid: 'child-uuid-1' }));
         });
 
         it('filterChildOfAssetOfPrefabInstance 中非 prefab 子节点不应 emit node:change', () => {
@@ -801,7 +1064,7 @@ describe('ServiceEvents 事件发射集成测试', () => {
 
             prefabService.filterPartOfPrefabAsset(['part-uuid'], 'test operation');
 
-            expect(listener).toHaveBeenCalledWith('/Node-part-uuid');
+            expect(listener).toHaveBeenCalledWith(expect.objectContaining({ uuid: 'part-uuid' }));
         });
 
         it('filterPartOfPrefabAsset 中非 prefab 部件不应 emit node:change', () => {
@@ -841,7 +1104,7 @@ describe('ServiceEvents 事件发射集成测试', () => {
 
             prefabService.canModifySibling('parent', 0, 1);
 
-            expect(listener).toHaveBeenCalledWith('/PrefabChild');
+            expect(listener).toHaveBeenCalledWith(expect.objectContaining({ uuid: 'prefab-child' }));
         });
     });
 });

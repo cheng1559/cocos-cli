@@ -5,6 +5,8 @@ import dumpUtil from '../dump';
 import { encodePrefab } from '../dump/encode';
 import type { INode, IPrefab, INodeDumpOptions } from '../../../common';
 import type { IScene } from '../../../common/editor/scene';
+import { preserveLightProbeCoefficients } from './light-probe-data';
+import { flushLightProbeTransformEdit } from './light-probe-transform';
 
 class SceneUtil {
     /** 默认超时：1分钟 */
@@ -15,6 +17,8 @@ class SceneUtil {
      * @param sceneAsset
      */
     runScene(sceneAsset: cc.SceneAsset | cc.Scene): Promise<cc.Scene> {
+        const scene = sceneAsset instanceof cc.SceneAsset ? sceneAsset.scene : sceneAsset;
+        const restoreProbeCoefficients = scene ? preserveLightProbeCoefficients(scene) : undefined;
         // 重要：清空节点与组件的 path 缓存，否则会出现数据重复的问题
         EditorExtends.Node.clear();
         EditorExtends.Component.clear();
@@ -29,7 +33,12 @@ class SceneUtil {
                         reject(err ?? new Error('Unknown scene run error'));
                         return;
                     }
-                    resolve(instance);
+                    try {
+                        restoreProbeCoefficients?.(instance);
+                        resolve(instance);
+                    } catch (error) {
+                        reject(error);
+                    }
                 }
             );
         });
@@ -144,7 +153,9 @@ class SceneUtil {
     generateNodeDump(node: cc.Node, options?: INodeDumpOptions): INode | IScene {
         const includeChildren = options?.includeChildren ?? true;
         const includeComponents = options?.includeComponents ?? true;
-        const d = dumpUtil.dumpNode(node) as any;
+        // Apply projection before encoding; deleting an already encoded component
+        // does not avoid traversing large probe arrays.
+        const d = dumpUtil.dumpNode(node, options) as any;
 
         d.__path__ = EditorExtends.Node.getNodePath(node);
         const prefab = d.__prefab__ ?? encodePrefab(node as any);
@@ -175,6 +186,7 @@ class SceneUtil {
      * @private
      */
     serialize(scene: cc.Scene) {
+        flushLightProbeTransformEdit(scene);
         const asset = new cc.SceneAsset();
         prefabUtils.gatherPrefabInstanceRoots(scene);
         prefabUtils.removeInvalidPrefabData(scene);
@@ -188,8 +200,25 @@ class SceneUtil {
      */
     async loadAny<TAsset extends cc.Asset>(uuid: string): Promise<TAsset> {
         return new Promise<TAsset>((resolve, reject) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+                settled = true;
+                reject(new Error(`加载资源超时: ${uuid}`));
+            }, SceneUtil.Timeout);
+
             cc.assetManager.assets.remove(uuid);
             cc.assetManager.loadAny<TAsset>(uuid, (error: Error | null, asset: TAsset) => {
+                if (settled) {
+                    // loadAny cannot be cancelled. If a timed-out request completes later,
+                    // remove only its own asset so a newer session is left untouched.
+                    if (!error && cc.assetManager.assets.get(uuid) === asset) {
+                        cc.assetManager.releaseAsset(asset);
+                    }
+                    return;
+                }
+
+                settled = true;
+                clearTimeout(timer);
                 if (error) {
                     reject(error);
                 } else {

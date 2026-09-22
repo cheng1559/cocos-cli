@@ -4,11 +4,6 @@ import * as path from 'path';
 // 命名空间导入拿不到 fs-extra 挂在 default 上的方法（fs.readJSONSync/outputJSON 会是 undefined）。
 // default 导入在主线程(CJS) / worker(ESM) 下都能拿到完整的 fs-extra。
 import fs from 'fs-extra';
-import {
-    Extractor,
-    ExtractorConfig,
-    ExtractorLogLevel,
-} from '@microsoft/api-extractor';
 // 纯类型导出必须用 import type：本文件以 ESM 加载（主线程与 worker 皆然），ESM 下把 TS 接口
 // （ExtractorResult / IConfigFile 在运行时不存在）当值导入会报 "does not provide an export"。
 // import type 会被擦除，不产生运行时绑定。
@@ -16,7 +11,6 @@ import type {
     ExtractorResult,
     IConfigFile,
 } from '@microsoft/api-extractor';
-import { Modularize } from '@cocos/ccbuild';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 // 带 .ts 扩展名：worker 内以 ESM 加载，Node ESM 解析不会自动补 .ts；显式扩展名在
@@ -70,7 +64,8 @@ function composeVersion(root: string, counter: number): string {
 
 // `type PlatformType = _PlatformType` into `type PlatformType = PlatformType`
 // (circular self-reference) when bundling the .d.ts files.
-function buildPlatformTypeUnion(): string {
+async function buildPlatformTypeUnion(): Promise<string> {
+    const { Modularize } = await import('@cocos/ccbuild');
     const allKeys = [
         ...Object.keys(Modularize.WebPlatform).filter(k => isNaN(Number(k))),
         ...Object.keys(Modularize.MinigamePlatform).filter(k => isNaN(Number(k))),
@@ -90,7 +85,7 @@ async function postProcessDts(filePath: string) {
     // Fix api-extractor circular self-reference for PlatformType
     const selfRef = 'type PlatformType = PlatformType;';
     if (content.includes(selfRef)) {
-        const platformTypeUnion = buildPlatformTypeUnion();
+        const platformTypeUnion = await buildPlatformTypeUnion();
         content = content.replace(
             new RegExp(selfRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
             `type PlatformType = ${platformTypeUnion};`
@@ -163,9 +158,17 @@ const entries: IDtsEntry[] = [
         source: 'src/lib/engine/engine.ts',
         output: 'engine.d.ts'
     }, {
+        name: 'mcp',
+        source: 'src/lib/mcp/mcp.ts',
+        output: 'mcp.d.ts'
+    }, {
         name: 'project',
         source: 'src/lib/project/project.ts',
         output: 'project.d.ts'
+    }, {
+        name: 'scene',
+        source: 'src/lib/scene/scene.ts',
+        output: 'scene.d.ts'
     }, {
         name: 'scripting',
         source: 'src/lib/scripting/scripting.ts',
@@ -174,6 +177,10 @@ const entries: IDtsEntry[] = [
         name: 'builder',
         source: 'src/lib/builder/builder.ts',
         output: 'builder.d.ts'
+    }, {
+        name: 'simulator',
+        source: 'src/lib/simulator/simulator.ts',
+        output: 'simulator.d.ts'
     }, {
         name: 'cli',
         source: 'src/lib/cli.ts',
@@ -202,6 +209,8 @@ const packageJSON = {
 };
 
 async function generate() {
+    const { Extractor, ExtractorConfig, ExtractorLogLevel } = await import('@microsoft/api-extractor');
+
     console.log(`Starting DTS generation for ${entries.length} entries...`);
 
     for (const entry of entries) {
@@ -321,7 +330,7 @@ if (isMainThread) {
     const runWorkerOnce = (): Promise<number> => new Promise((resolve, reject) => {
         const worker = new Worker(workerPath, {
             resourceLimits: {
-                stackSizeMb: 16,
+                stackSizeMb: 64,
                 maxOldGenerationSizeMb: 4096,
             },
         });

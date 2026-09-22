@@ -1,6 +1,7 @@
 import type { IBuildCacheUseConfig } from '../@types';
 import type { BuildConfiguration } from '../@types/config-export';
-import type { ICocosConfigurationNode, IConfigurationItem } from '../../configuration/script/metadata';
+import type { IBuilderConfigItem } from '../@types/protected';
+import type { ICocosConfigurationNode, ICocosConfigurationPropertySchema, IConfigurationItem } from '../../configuration/script/metadata';
 import { DefaultBundleConfig } from './bundle-utils';
 import {
     convertConfigItem,
@@ -33,6 +34,47 @@ const DEFAULT_TEXTURE_COMPRESS_CONFIG: BuildConfiguration['textureCompressConfig
     customConfigs: {},
     genMipmaps: false,
 };
+
+const PLATFORM_HIDDEN_SCHEMA_OPTIONS: Record<string, string[]> = {
+    'web-mobile': [
+        'binGroupConfig',
+        'skipCompressTexture',
+        'packAutoAtlas',
+    ],
+    android: [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+    mac: [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+    ios: [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+    'huawei-agc': [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+    ohos: [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+    'harmonyos-next': [
+        'nativeCodeBundleMode',
+        'gfx-webgl2'
+    ],
+};
+
+function convertBuilderConfigItem(
+    item: IConfigurationItem,
+    key: string,
+    platform?: string
+): ICocosConfigurationPropertySchema | undefined {
+    const hiddenKeys = platform ? PLATFORM_HIDDEN_SCHEMA_OPTIONS[platform] : undefined;
+    return convertConfigItem(item, key, hiddenKeys);
+}
 
 export function createBuilderCoreMetadataNodes(
     commonOptionConfigs: Record<string, IConfigurationItem>,
@@ -73,15 +115,48 @@ export function createBuilderMetadataNodes(source: IBuilderMetadataSource): ICoc
     return nodes;
 }
 
+export function createBuilderRenderSchema(
+    config: Record<string, IBuilderConfigItem>,
+    platform?: string
+): ICocosConfigurationPropertySchema {
+    const properties: Record<string, ICocosConfigurationPropertySchema> = {};
+    const required: string[] = [];
+
+    for (const [key, item] of Object.entries(config)) {
+        if (!hasConfigItemShape(item)) {
+            continue;
+        }
+
+        const schema = convertBuilderConfigItem(item, key, platform);
+        if (!schema) {
+            continue;
+        }
+        properties[key] = schema;
+
+        if (item.verifyRules?.includes('required')) {
+            required.push(key);
+        }
+    }
+
+    const result: ICocosConfigurationPropertySchema = { type: 'object', properties };
+    if (required.length) {
+        result.required = required;
+    }
+    return result;
+}
+
 function createBuilderCommonNode(
     commonOptionConfigs: Record<string, IConfigurationItem>,
     order: number
 ): ICocosConfigurationNode {
-    const properties: Record<string, ReturnType<typeof convertConfigItem>> = {};
+    const properties: Record<string, ReturnType<typeof objectSchema> | Exclude<ReturnType<typeof convertBuilderConfigItem>, undefined>> = {};
 
     for (const [key, item] of Object.entries(commonOptionConfigs)) {
         if (hasConfigItemShape(item)) {
-            properties[`builder.common.${key}`] = convertConfigItem(item, key);
+            const schema = convertBuilderConfigItem(item, key);
+            if (schema) {
+                properties[`builder.common.${key}`] = schema;
+            }
         }
     }
 
@@ -157,7 +232,7 @@ function createBuilderPlatformNode(
         return undefined;
     }
 
-    const properties: Record<string, ReturnType<typeof objectSchema> | ReturnType<typeof convertConfigItem>> = {
+    const properties: Record<string, ReturnType<typeof objectSchema>> = {
         [`builder.platforms.${platform}.outputName`]: {
             type: 'string',
             default: platform,
@@ -166,10 +241,13 @@ function createBuilderPlatformNode(
     };
 
     for (const [pkgName, config] of Object.entries(configs)) {
-        const packageProperties: Record<string, ReturnType<typeof convertConfigItem>> = {};
+        const packageProperties: Record<string, ReturnType<typeof objectSchema> | Exclude<ReturnType<typeof convertBuilderConfigItem>, undefined>> = {};
         for (const [key, item] of Object.entries(config.options ?? {})) {
             if (hasConfigItemShape(item)) {
-                packageProperties[key] = convertConfigItem(item, key);
+                const schema = convertBuilderConfigItem(item, key, platform);
+                if (schema) {
+                    packageProperties[key] = schema;
+                }
             }
         }
 

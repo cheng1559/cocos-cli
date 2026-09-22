@@ -1,8 +1,9 @@
-import type { AnimationMaskChange, AnimationMaskDump, AssetOperationOption, AssetPropertySchemaMap, CreateAssetByTypeOptions, DeleteAssetOptions, IAssetFileSystemProvider, IAssetInfo, IAssetMeta, ISupportCreateType, MaterialDump, MaterialEffectInfo, MaterialTechniqueDump, QueryAssetsOption, SerializedAssetPatch, SerializedAssetQueryResult } from '../../core/assets/@types/public';
+import type { AnimationGraphChangedEvent, AnimationGraphExpectedVersion, AnimationGraphInspectorPropertyOperationRequest, AnimationGraphInspectorSnapshot, AnimationGraphMotionPreviewData, AnimationGraphPoseGraphAssetDragHandlersEntry, AnimationGraphSnapshot, AnimationGraphTarget, AssetOperationOption, AssetPropertySchemaMap, CreateAssetByTypeOptions, DeleteAssetOptions, ExecuteAnimationGraphCommandRequest, IAssetFileSystemProvider, IAssetInfo, IAssetMeta, ISupportCreateType, MaterialDump, MaterialEffectInfo, MaterialTechniqueDump, QueryAssetsOption, ReloadAnimationGraphOptions, SerializedAssetPatch, SerializedAssetQueryResult, SetAnimationGraphInspectorPropertyRequest, AnimationMaskChange, AnimationMaskDump } from '../../core/assets/@types/public';
 import type { CreateAssetOptions, IAssetConfig, IAssetDBInfo, ICreateMenuInfo, IUerDataConfigItem, QueryAssetType, ThumbnailInfo, ThumbnailSize } from '../../core/assets/@types/protected';
 import type { FilterPluginOptions, IPluginScriptInfo } from '../../core/scripting/interface';
 import { assetDBManager, assetManager } from '../../core/assets';
 import type { AnimGraphVariantDump } from '../../core/assets/animation-graph-variant';
+import { normalize } from 'path';
 
 export type * from '../../core/assets/@types/public';
 export type { CreateAssetOptions, IAssetConfig, IAssetDBInfo, ICreateMenuInfo, IUerDataConfigItem, QueryAssetType } from '../../core/assets/@types/protected';
@@ -28,6 +29,36 @@ export function setFileSystemProvider(provider: IAssetFileSystemProvider): void 
 export async function start(): Promise<void> {
     const { startAssetDB } = await import('../../core/assets');
     await startAssetDB();
+}
+
+/**
+ * Reconcile the current project's enabled Localization Runtime builtin mount.
+ * The caller supplies no mount identity or registration data: the host
+ * re-reads the persisted enable flag and packaged manifest, then uses the
+ * canonical register info with AssetDBManager.addDB().
+ */
+export async function reconcileLocalizationRuntimeMount(): Promise<void> {
+    if (!assetDBManager.ready) {
+        throw new Error('Asset database is not ready; call Assets.start before reconciling the Localization Runtime.');
+    }
+
+    const { default: assetConfig } = await import('../../core/assets/asset-config');
+    const registerInfo = assetConfig.resolveBuiltinLocalizationMount();
+    const existing = assetDBManager.assetDBMap[registerInfo.name];
+    if (existing) {
+        if (normalize(existing.options.target) !== normalize(registerInfo.target)) {
+            throw new Error(`Localization Runtime AssetDB target conflict for '${registerInfo.name}'.`);
+        }
+    } else {
+        await assetDBManager.addDB(registerInfo);
+    }
+
+    if (!assetDBManager.assetDBMap[registerInfo.name]) {
+        throw new Error(`Localization Runtime AssetDB '${registerInfo.name}' was not registered.`);
+    }
+    if (!assetConfig.data.assetDBList.some((info) => info.name === registerInfo.name)) {
+        assetConfig.data.assetDBList.push(registerInfo);
+    }
 }
 
 /**
@@ -100,7 +131,12 @@ export async function queryAssetInfo(
     urlOrUUIDOrPath: string,
     dataKeys?: string[] | undefined
 ): Promise<IAssetInfo | null> {
-    return await assetManager.queryAssetInfo(urlOrUUIDOrPath, dataKeys as (keyof IAssetInfo)[] | undefined);
+    const info = await assetManager.queryAssetInfo(urlOrUUIDOrPath, dataKeys as (keyof IAssetInfo)[] | undefined);
+    // This module is exposed through the Electron MessagePort RPC bridge. Some
+    // asset-db implementations attach helper functions to otherwise plain asset
+    // data; those functions cannot be structured-cloned and made Asset Preview's
+    // queryAssetInfo() fail before it can resolve FBX Prefab sub-assets.
+    return info ? JSON.parse(JSON.stringify(info)) as IAssetInfo : null;
 }
 
 /**
@@ -120,8 +156,8 @@ export async function queryCreateMap(): Promise<ICreateMenuInfo[]> {
 /**
  * Batch Query Asset Info // 批量查询资源信息
  */
-export async function queryAssetInfos(options?: QueryAssetsOption): Promise<IAssetInfo[]> {
-    return await assetManager.queryAssetInfos(options);
+export async function queryAssetInfos(options?: QueryAssetsOption, dataKeys?: (keyof IAssetInfo)[]): Promise<IAssetInfo[]> {
+    return await assetManager.queryAssetInfos(options, dataKeys);
 }
 
 /**
@@ -164,6 +200,17 @@ export async function importAsset(
 }
 
 /**
+ * Copy Asset // 复制资源及其完整元数据
+ */
+export async function copyAsset(
+    source: string,
+    target: string,
+    options?: AssetOperationOption
+): Promise<IAssetInfo> {
+    return await assetManager.copyAsset(source, target, options);
+}
+
+/**
  * Reimport Asset // 重新导入资源
  */
 export async function reimportAsset(pathOrUrlOrUUID: string): Promise<IAssetInfo> {
@@ -191,6 +238,82 @@ export const animationGraphVariant = {
 
     save(uuid: string): Promise<void> {
         return assetManager.saveAnimationGraphVariant(uuid);
+    },
+};
+
+export const animationGraph = {
+    query(uuidOrUrlOrPath: string): Promise<AnimationGraphSnapshot> {
+        return assetManager.queryAnimationGraph(uuidOrUrlOrPath);
+    },
+
+    queryInspector(
+        uuidOrUrlOrPath: string,
+        target: AnimationGraphTarget,
+    ): Promise<AnimationGraphInspectorSnapshot> {
+        return assetManager.queryAnimationGraphInspector(uuidOrUrlOrPath, target);
+    },
+
+    queryMotionPreviewData(
+        uuidOrUrlOrPath: string,
+        target: Extract<AnimationGraphTarget, { kind: 'motion' }>,
+    ): Promise<AnimationGraphMotionPreviewData> {
+        return assetManager.queryAnimationGraphMotionPreviewData(uuidOrUrlOrPath, target);
+    },
+
+    queryPoseGraphAssetDragHandlers(): Promise<AnimationGraphPoseGraphAssetDragHandlersEntry[]> {
+        return assetManager.queryAnimationGraphPoseGraphAssetDragHandlers();
+    },
+
+    queryStateMachineComponentTypes(): Promise<string[]> {
+        return assetManager.queryAnimationGraphStateMachineComponentTypes();
+    },
+
+    setInspectorProperty(
+        uuidOrUrlOrPath: string,
+        request: SetAnimationGraphInspectorPropertyRequest,
+    ): Promise<AnimationGraphInspectorSnapshot> {
+        return assetManager.setAnimationGraphInspectorProperty(uuidOrUrlOrPath, request);
+    },
+
+    resetInspectorProperty(
+        uuidOrUrlOrPath: string,
+        request: AnimationGraphInspectorPropertyOperationRequest,
+    ): Promise<AnimationGraphInspectorSnapshot> {
+        return assetManager.resetAnimationGraphInspectorProperty(uuidOrUrlOrPath, request);
+    },
+
+    createInspectorProperty(
+        uuidOrUrlOrPath: string,
+        request: AnimationGraphInspectorPropertyOperationRequest,
+    ): Promise<AnimationGraphInspectorSnapshot> {
+        return assetManager.createAnimationGraphInspectorProperty(uuidOrUrlOrPath, request);
+    },
+
+    execute(
+        uuidOrUrlOrPath: string,
+        request: ExecuteAnimationGraphCommandRequest,
+    ): Promise<AnimationGraphSnapshot> {
+        return assetManager.executeAnimationGraphCommand(uuidOrUrlOrPath, request);
+    },
+
+    save(
+        uuidOrUrlOrPath: string,
+        expected: AnimationGraphExpectedVersion,
+        sourceId?: string,
+    ): Promise<AnimationGraphSnapshot> {
+        return assetManager.saveAnimationGraph(uuidOrUrlOrPath, expected, sourceId);
+    },
+
+    reload(
+        uuidOrUrlOrPath: string,
+        options?: ReloadAnimationGraphOptions,
+        sourceId?: string,
+    ): Promise<AnimationGraphSnapshot> {
+        return assetManager.reloadAnimationGraph(uuidOrUrlOrPath, options, sourceId);
+    },
+
+    onChanged(listener: (event: AnimationGraphChangedEvent) => void): () => void {
+        return assetManager.onAnimationGraphChanged(listener);
     },
 };
 

@@ -6,6 +6,7 @@ const { Client } = require('basic-ftp');
 const { Command } = require('commander');
 const gulp = require('gulp');
 const { runCommand, create7ZipArchive, zipArchive } = require('./utils');
+const { materializeAssetDbWorkspace } = require('./materialize-asset-db-workspace');
 
 // Global context to share state between tasks
 const context = {
@@ -170,6 +171,18 @@ async function scanProjectFiles() {
 
     console.log(`Found ${allFiles.length} files to copy`);
     context.allFiles = allFiles;
+}
+
+/**
+ * Build simulator artifacts under packages/engine before file scanning.
+ */
+async function buildSimulatorArtifacts() {
+    if (process.env.SKIP_SIMULATOR_BUILD === '1') {
+        console.log('Skipping simulator build in release because SKIP_SIMULATOR_BUILD=1');
+        return;
+    }
+
+    await runCommand('npm', ['run', 'build:simulator'], { cwd: context.rootDir });
 }
 
 /**
@@ -466,9 +479,15 @@ function createReleasePipeline(config) {
         await runCommand('npm', ['install', '--production', '--ignore-scripts'], { cwd: path.join(dir, 'packages/engine') });
     };
 
+    const materializeWorkspaces = async () => {
+        await materializeAssetDbWorkspace(extensionDir());
+    };
+
     const rebuild = async () => {
         if (config.type === 'electron') {
             await runCommand('npm', ['run', 'rebuild'], { cwd: extensionDir() });
+        } else {
+            await runCommand('npm', ['run', 'rebuild:node-gyp'], { cwd: extensionDir() });
         }
     };
 
@@ -529,6 +548,7 @@ function createReleasePipeline(config) {
         prepareDir,
         copyFiles,
         installProd,
+        materializeWorkspaces,
         rebuild,
         test,
         sign,
@@ -543,14 +563,18 @@ function createReleasePipeline(config) {
 // Define base tasks
 const initTask = gulp.series(
     async () => await getProjectVersion(),
-    async () => await readIgnorePatterns(),
-    async () => await scanProjectFiles()
+    async () => await readIgnorePatterns()
 );
 
 const prepareTask = gulp.series(
     clean,
     updateRepos,
-    installDeps
+    installDeps,
+    buildSimulatorArtifacts
+);
+
+const collectFilesTask = gulp.series(
+    async () => await scanProjectFiles()
 );
 
 // Main release task
@@ -558,6 +582,7 @@ gulp.task('release', gulp.series(
     (cb) => parseArgs(cb),
     initTask,
     prepareTask,
+    collectFilesTask,
     async (cb) => {
         // Dynamically create and execute pipelines based on configs
         const pipelines = context.configs.map(config => createReleasePipeline(config));

@@ -1,10 +1,16 @@
+import type { IReflectionProbeSceneIdentity } from '../common/reflection-probe';
 import * as EditorExtends from '../../engine/editor-extends';
 import { Rpc } from './rpc';
 import { serviceManager } from './service/service-manager';
 import { Service as DecoratorService } from './service/core/decorator';
+import { ServiceEvents } from './service/core';
+import { ReferenceImageService } from './service/reference-image';
 import { messageManager } from './service/message';
 import { initLocalI18n } from './i18n';
 import { CUSTOM_PIPELINE_MODULE } from '../../engine/graphics-config';
+import { fetchSceneEditorSettings, syncSceneEditorBundles } from './scene-editor-assets';
+import { installLightProbeNormalReset } from './light-probe-normal-reset';
+import type { IEditorSessionService } from './service/core/editor-session';
 
 import './service';
 
@@ -19,8 +25,14 @@ if (EditorExtends.UuidUtils) {
 
 export { serviceManager, EditorExtends };
 export const Service = DecoratorService;
+// This value is intentionally exported through the preview bridge. Its module
+// registers the service with @register(), and this live export prevents the
+// web bundle from pruning that registration side effect.
+export { ReferenceImageService };
 
 declare const cc: any;
+
+const DEFERRED_MODULE_CACHE_KEY = '__cocosCliDeferredEngineModules';
 
 export async function startup(options: {
     serverURL: string;
@@ -37,6 +49,7 @@ export async function startup(options: {
     if (customPipeline && !config.overrideSettings.rendering.effectSettingsPath) {
         config.overrideSettings.rendering.effectSettingsPath = `${serverURL}/scripting/engine/effect-settings`;
     }
+    const sceneEditorSettings = await fetchSceneEditorSettings(serverURL);
 
     serviceManager.initialize(serverURL);
 
@@ -56,6 +69,8 @@ export async function startup(options: {
         'cc/editor/exotic-animation',
         'cc/editor/color-utils',
     ];
+    const deferredModuleCache: Record<string, unknown> = Object.create(null);
+    (globalThis as any)[DEFERRED_MODULE_CACHE_KEY] = deferredModuleCache;
 
     // IMPORTANT: We must NOT use import() here because Rollup's
     // resolveId hook aliases cc/editor/* to a cc re-export stub,
@@ -63,22 +78,10 @@ export async function startup(options: {
     // We use the __moduleImport placeholder which is replaced with SystemJS's module.import().
     for (const mod of requiredModules) {
         try {
-            await System.import(mod);
+            deferredModuleCache[mod] = await System.import(mod);
         } catch (e) {
             console.error('Failed to load engine module:', mod, 'e:', e);
         }
-    }
-
-    let _decodeCCONBinaryCached = false;
-    let _decodeCCONBinary: ((bytes: Uint8Array) => any) | null = null;
-    async function getDecodeCCONBinary(): Promise<((bytes: Uint8Array) => any) | null> {
-        if (_decodeCCONBinaryCached) return _decodeCCONBinary;
-        try {
-            const m: any = await System.import('cc/editor/serialization');
-            _decodeCCONBinary = m?.decodeCCONBinary ?? null;
-        } catch { _decodeCCONBinary = null; }
-        _decodeCCONBinaryCached = true;
-        return _decodeCCONBinary;
     }
 
     // ---- hack creator 使用的一些 engine 参数
@@ -121,6 +124,11 @@ export async function startup(options: {
     cc.physics.selector.runInEditor = true;
 
     await cc.game.init(config);
+    installLightProbeNormalReset(cc);
+    // scene 进程运行在编辑器内嵌视图中，屏幕方向无意义；项目设置默认 'auto' 会让
+    // screenAdapter.orientation 停在 Orientation.AUTO(13)，引擎 resize 时对未映射方向打 DEBUG 告警，这里固定为竖屏。
+    cc.view.setOrientation(cc.macro.ORIENTATION_PORTRAIT);
+    await syncSceneEditorBundles(serverURL, sceneEditorSettings?.bundleConfigs);
 
     let backend = 'builtin';
     const Backends: Record<string, string> = {
@@ -137,6 +145,9 @@ export async function startup(options: {
 
     // 切换物理引擎
     cc.physics.selector.switchTo(backend);
+    if (cc.physics.PhysicsSystem?.instance) {
+        cc.physics.PhysicsSystem.instance.enable = false;
+    }
     const dr = config?.overrideSettings?.screen?.designResolution;
     const drWidth = dr?.width ?? 1280;
     const drHeight = dr?.height ?? 720;
@@ -179,271 +190,6 @@ export async function startup(options: {
     // services create cameras that would otherwise render on mainWindow
     // before any scene is loaded, causing FRAMEBUFFER_INCOMPLETE errors.
     DecoratorService.Engine.pause();
-
-    // Override assetManager.loadAny to fetch project assets from the server
-    // when they aren't found in any loaded bundle (e.g., main bundle not loaded).
-    const am = cc.assetManager;
-    const origLoadAny = am.loadAny.bind(am);
-
-    // Tracks per-uuid native (image/buffer) loading. An asset is added to the
-    // asset cache before its native data is attached (so circular references can
-    // resolve), which means a concurrent cache hit could otherwise return a
-    // texture/image whose width/height are still 0. Cache hits await this to get
-    // fully-loaded dimensions; see loadFromServer / loadAny below.
-    const nativeReady = new Map<string, Promise<void>>();
-
-    // Dedups concurrent loads of the same uuid during the fetch/deserialize
-    // window (before the asset is registered in the cache). Without this, two
-    // sprite frames sharing a texture can each start a separate load, producing
-    // duplicate half-initialized instances and racing the nativeReady bookkeeping
-    // (one loader deleting the other's readiness promise), which leaves a
-    // width-0 texture reachable via a cache hit.
-    const inFlight = new Map<string, Promise<{ err: any; asset: any }>>();
-
-    function tryDecompress(uuid: string): string {
-        if (uuid.includes('-')) return uuid;
-        try {
-            return (EditorExtends.UuidUtils as any)?.decompressUuid?.(uuid) ?? uuid;
-        } catch { return uuid; }
-    }
-
-    function isUuidInBundles(uuid: string): boolean {
-        const variants = [uuid, uuid.split('@')[0]];
-        const dec = tryDecompress(uuid);
-        if (dec !== uuid) variants.push(dec, dec.split('@')[0]);
-
-        let found = false;
-        am.bundles.forEach((bundle: any) => {
-            if (found) return;
-            for (const v of variants) {
-                if (bundle.getAssetInfo(v)) { found = true; return; }
-            }
-        });
-        return found;
-    }
-
-    const silentClassFinder = (id: string) => cc.js?.getClassById?.(id) ?? cc._MissingScript ?? null;
-
-    async function queryNativeExt(uuid: string): Promise<string> {
-        // The imported asset JSON (e.g. cc.ImageAsset, serialized as
-        // { fmt, w:0, h:0 }) does not embed the native extension — it lives in
-        // the asset's library file map. Recover it so assets whose real data
-        // (and, for images, their width/height) come from the native file can
-        // be loaded. Without this, an ImageAsset stays 0x0, its Texture2D
-        // reports width 0, and every SpriteFrame on it fails checkRect and gets
-        // its rect reset (e.g. sprite frames from a plist atlas in a prefab).
-        try {
-            const res = await fetch(`${serverURL}/query-asset-info/${encodeURIComponent(uuid)}`);
-            if (!res.ok) return '';
-            const info: any = await res.json();
-            const lib = info?.library;
-            if (!lib) return '';
-            // The native entry is the library file that is not the serialized
-            // asset itself (.json / .cconb).
-            const key = Object.keys(lib).find((k) => k !== '.json' && k !== '.cconb');
-            return key ?? '';
-        } catch {
-            return '';
-        }
-    }
-
-    async function loadNativeAsset(asset: any, uuid: string): Promise<void> {
-        let nativeExt: string | undefined = asset._native;
-        // Only ImageAsset needs the native-extension recovery: its serialized
-        // JSON is { fmt, w:0, h:0 } and the real dimensions come from the native
-        // image. Restricting the extra /query-asset-info lookup to images avoids
-        // issuing a blocking request for every other asset in the graph
-        // (prefabs, components, materials, ...), which would otherwise stall a
-        // large scene/prefab load.
-        if (!nativeExt && cc.ImageAsset && asset instanceof cc.ImageAsset) {
-            nativeExt = await queryNativeExt(uuid);
-            if (nativeExt) asset._native = nativeExt;
-        }
-        if (!nativeExt) return;
-
-        const encodedUuid = encodeURIComponent(uuid);
-        const isSubAsset = nativeExt.length > 0 && nativeExt[0] !== '.';
-        const nativeUrl = isSubAsset
-            ? `${serverURL}/native/${encodedUuid}/${nativeExt}?isBrowser=true`
-            : `${serverURL}/native/${encodedUuid}${nativeExt}?isBrowser=true`;
-
-        try {
-            const res = await fetch(nativeUrl);
-            if (!res.ok) return;
-
-            const ext = nativeExt.split('.').pop()?.toLowerCase() ?? '';
-            const imageExts = ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'];
-
-            if (imageExts.includes(ext)) {
-                const blob = await res.blob();
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                await new Promise<void>((resolve, reject) => {
-                    img.onload = () => resolve();
-                    img.onerror = reject;
-                    img.src = URL.createObjectURL(blob);
-                });
-                asset._nativeAsset = img;
-            } else {
-                asset._nativeAsset = await res.arrayBuffer();
-            }
-        } catch { /* native data unavailable */ }
-    }
-
-    async function loadFromServer(uuid: string, onComplete: any) {
-        try {
-            const encodedUuid = encodeURIComponent(uuid);
-
-            // Query the correct file extension — assets may be stored as
-            // binary (.bin/cconb) instead of .json.
-            let ext = 'json';
-            try {
-                const extRes = await fetch(`${serverURL}/query-extname/${encodedUuid}`);
-                const queryExt = (await extRes.text()).trim();
-                if (queryExt === '.cconb') ext = 'bin';
-            } catch { /* default to json */ }
-
-            const res = await fetch(`${serverURL}/import/${encodedUuid}.${ext}?isBrowser=true`);
-            if (!res.ok) throw new Error(`Asset fetch failed (${res.status}): ${uuid}`);
-
-            const isBinary = ext === 'bin';
-            let deserializeInput: any;
-            if (isBinary) {
-                const rawBytes = new Uint8Array(await res.arrayBuffer());
-                const decode = await getDecodeCCONBinary();
-                if (decode) {
-                    deserializeInput = decode(rawBytes);
-                } else {
-                    console.warn(`[loadFromServer] decodeCCONBinary not available, cannot decode CCONB for ${uuid}`);
-                    onComplete?.(new Error('decodeCCONBinary not available'), null);
-                    return;
-                }
-            } else {
-                deserializeInput = await res.json();
-            }
-
-            const Details = cc.deserialize?.Details;
-            let asset;
-            let details: any;
-            const deserializeOpts = { classFinder: silentClassFinder };
-
-            if (Details) {
-                details = Details.pool?.get?.() ?? new Details();
-                if (details.reset) details.reset();
-                asset = cc.deserialize(deserializeInput, details, deserializeOpts);
-            } else {
-                asset = cc.deserialize(deserializeInput, undefined, deserializeOpts);
-            }
-
-            // Register in the cache BEFORE resolving dependencies. Circular
-            // references (e.g. a SpriteAtlas lists its SpriteFrames while each
-            // SpriteFrame references its atlas back) would otherwise re-enter
-            // loadFromServer for an asset already being loaded and recurse
-            // forever. With the (partial) instance already cached, the circular
-            // loadAny below resolves to it and the cycle is broken.
-            asset._uuid = uuid;
-            am.assets.add(uuid, asset);
-
-            // For width/data-sensitive leaf assets (textures/images), publish a
-            // readiness promise now — synchronously with the cache add — so a
-            // concurrent cache hit waits for the fully-loaded asset instead of
-            // reading a still-zero-sized one. These types never take part in a
-            // dependency cycle, so awaiting them cannot deadlock. Other
-            // (potentially cyclic) types are intentionally left without a promise
-            // so their cache hits return the partial instance immediately, which
-            // is what breaks the cycle above.
-            let resolveReady: (() => void) | undefined;
-            const needsReady = (cc.TextureBase && asset instanceof cc.TextureBase)
-                || (cc.ImageAsset && asset instanceof cc.ImageAsset);
-            if (needsReady) {
-                nativeReady.set(uuid, new Promise<void>((r) => { resolveReady = r; }));
-            }
-
-            try {
-                if (details) {
-                    const uuidList = details.uuidList;
-                    if (uuidList && uuidList.length > 0) {
-                        const depMap: Record<string, any> = {};
-                        await Promise.all(
-                            uuidList
-                                .filter((id: any) => typeof id === 'string')
-                                .map((depUuid: string) => new Promise<void>((resolve) => {
-                                    am.loadAny(depUuid, (err: any, depAsset: any) => {
-                                        if (!err && depAsset) depMap[depUuid] = depAsset;
-                                        resolve();
-                                    });
-                                })),
-                        );
-                        if (details.assignAssetsBy) {
-                            details.assignAssetsBy((depUuid: string) => depMap[depUuid] ?? null);
-                        }
-                    }
-                    Details.pool?.put?.(details);
-                }
-
-                stripNullComponents(asset);
-                if (asset.data) stripNullComponents(asset.data);
-                await loadNativeAsset(asset, uuid);
-                try { if (asset.onLoaded) asset.onLoaded(); } catch { /* some assets need specific native data */ }
-            } finally {
-                if (resolveReady) {
-                    nativeReady.delete(uuid);
-                    resolveReady();
-                }
-            }
-            onComplete?.(null, asset);
-        } catch (e: any) {
-            console.warn(`[AssetFallback] load failed for ${uuid}:`, e);
-            onComplete?.(e, null);
-        }
-    }
-
-    am.loadAny = function (requests: any, options: any, onComplete: any) {
-        if (typeof options === 'function') {
-            onComplete = options;
-            options = null;
-        }
-        const uuid = typeof requests === 'string' ? requests
-            : Array.isArray(requests) ? requests[0]
-            : requests?.uuid || requests;
-
-        if (typeof uuid === 'string' && !isUuidInBundles(uuid)) {
-            const dec = tryDecompress(uuid);
-            const cached = am.assets.get(uuid) ?? am.assets.get(dec);
-            if (cached) {
-                // The asset may be cached but still loading its native data
-                // (added to the cache early to break circular refs). Wait for it
-                // so shared textures/images report their real width/height.
-                const nr = nativeReady.get(uuid) ?? nativeReady.get(dec);
-                if (nr) {
-                    nr.then(() => onComplete?.(null, cached), () => onComplete?.(null, cached));
-                } else {
-                    onComplete?.(null, cached);
-                }
-                return;
-            }
-            // Dedup concurrent loads of the same uuid that arrive before it is
-            // registered in the cache, so only one loadFromServer runs per asset.
-            // (Circular back-references hit the cache above — the asset is cached
-            // before its dependencies are resolved — so they never reach here,
-            // meaning this await can never target an ancestor and cannot deadlock.)
-            const inf = inFlight.get(uuid) ?? inFlight.get(dec);
-            if (inf) {
-                inf.then(({ err, asset }) => onComplete?.(err, asset));
-                return;
-            }
-            let settle!: (r: { err: any; asset: any }) => void;
-            const p = new Promise<{ err: any; asset: any }>((resolve) => { settle = resolve; });
-            inFlight.set(uuid, p);
-            loadFromServer(uuid, (err: any, asset: any) => {
-                inFlight.delete(uuid);
-                onComplete?.(err, asset);
-                settle({ err, asset });
-            });
-            return;
-        }
-        origLoadAny(requests, options, onComplete);
-    };
 
     await serviceManager.initAllServices();
 
@@ -493,6 +239,32 @@ async function setupBrowserInvokeChannel(serverURL: string) {
             return;
         }
         const socket = io(serverURL);
+        let rendererVisible: boolean | undefined;
+        const updateRendererVisibility = (visible: boolean) => {
+            rendererVisible = visible;
+            socket.emit('scene-renderer:visibility', { visible });
+        };
+        // Pink retains a hidden, empty Scene Webview for preloading. Track the
+        // host-reported visibility without taking over Pink's bridge, so Node-side
+        // tools select the displayed scene.
+        window.addEventListener('message', (event: MessageEvent) => {
+            const message = event.data;
+            if (message?.kind === 'event'
+                && message.event === 'editor:visibility-changed'
+                && typeof message.data?.visible === 'boolean') {
+                updateRendererVisibility(message.data.visible);
+            }
+        });
+        ServiceEvents.on('scene-view:visibility-changed', updateRendererVisibility);
+        const querySceneUrl = async (): Promise<string> => {
+            const current = await DecoratorService.Editor.queryCurrent();
+            return (current as any)?.__identifier__?.assetUrl ?? (current as any)?.assetUrl ?? '';
+        };
+        let rendererSceneUrl = '';
+        const updateRendererScene = (sceneUrl: string) => {
+            rendererSceneUrl = sceneUrl;
+            socket.emit('scene-renderer:scene', { sceneUrl });
+        };
         const invoke = (module: string, method: string, args?: any[]) => {
             try {
                 const svc = (DecoratorService as any)[module];
@@ -508,8 +280,223 @@ async function setupBrowserInvokeChannel(serverURL: string) {
                 invoke(msg.module, msg.method, msg.args);
             }
         });
-        // 连接建立时同步一次设计分辨率（首次进入 / 断线重连时补齐错过的变更）
-        socket.on('connect', () => invoke('Engine', 'syncDesignResolution', []));
+        socket.on('scene:invoke-lightfx', async (
+            msg: {
+                sceneUrl?: string;
+                module?: 'LightProbeBake' | 'LightmapBake';
+                method?: 'bake' | 'querySettings' | 'queryBakeInfo' | 'queryCapabilities' | 'clearBake' | 'cancel';
+                args?: unknown[];
+            },
+            reply: (response: { result?: unknown; sceneUrl?: string; error?: string }) => void,
+        ) => {
+            try {
+                const methods = msg?.module === 'LightProbeBake'
+                    ? new Set(['bake', 'querySettings', 'queryCapabilities', 'clearBake', 'cancel'])
+                    : msg?.module === 'LightmapBake'
+                        ? new Set(['bake', 'queryCapabilities', 'queryBakeInfo', 'clearBake', 'cancel'])
+                        : null;
+                if (!methods?.has(msg.method || '')) {
+                    throw new Error('Invalid LightFX scene request.');
+                }
+
+                if (msg.module === 'LightProbeBake' && msg.method === 'querySettings') {
+                    // This frequently polled read must not call queryCurrent(), which
+                    // encodes all baked probes and tetrahedra just to obtain the URL.
+                    const editor = DecoratorService.Editor as typeof DecoratorService.Editor & IEditorSessionService;
+                    const session = editor.getEditorSession();
+                    const scene = cc.director.getScene();
+                    const assertCurrent = () => {
+                        if (!scene || cc.director.getScene() !== scene || !editor.isCurrentEditorSession(session)) {
+                            throw new Error('The source scene changed during the light-probe settings query.');
+                        }
+                    };
+                    assertCurrent();
+                    if (!session.uuid || editor.getCurrentEditorType() !== 'scene') {
+                        throw new Error('Light-probe settings require an open scene.');
+                    }
+                    const assetInfo = await Rpc.getInstance().request('assetManager', 'queryAssetInfo', [session.uuid]);
+                    assertCurrent();
+                    const sceneUrl = assetInfo?.url;
+                    if (!sceneUrl || sceneUrl !== msg.sceneUrl) {
+                        throw new Error(`The selected scene renderer is not displaying the requested scene: ${msg.sceneUrl || 'unknown'}.`);
+                    }
+                    const result = await DecoratorService.LightProbeBake.querySettings();
+                    assertCurrent();
+                    reply({ result, sceneUrl });
+                    return;
+                }
+
+                const currentSceneUrl = await querySceneUrl();
+                if (msg.method !== 'cancel' && (!currentSceneUrl || currentSceneUrl !== msg.sceneUrl)) {
+                    throw new Error(
+                        `The selected scene renderer is not displaying the requested scene: ${msg.sceneUrl || 'unknown'}.`,
+                    );
+                }
+
+                const service = (DecoratorService as any)[msg.module!];
+                const result = await service[msg.method!](...(msg.args || []));
+                const finalSceneUrl = await querySceneUrl().catch(() => '');
+                if (finalSceneUrl) updateRendererScene(finalSceneUrl);
+                reply({ result, sceneUrl: finalSceneUrl });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        socket.on('scene:capture-reflection-probe', async (
+            msg: { source?: IReflectionProbeSceneIdentity; sceneUrl?: string; nodePath?: string; componentUuid?: string; timeoutMs?: number },
+            reply: (response: { result?: unknown; error?: string }) => void,
+        ) => {
+            try {
+                if (!msg?.nodePath) {
+                    throw new Error('Invalid reflection-probe capture request.');
+                }
+                if (msg.sceneUrl) {
+                    const currentSceneUrl = await querySceneUrl().catch(() => '');
+                    if (currentSceneUrl !== msg.sceneUrl) {
+                        throw new Error(
+                            `The WebGL scene renderer is not displaying the requested scene: ${msg.sceneUrl}.`,
+                        );
+                    }
+                }
+                const result = await (DecoratorService.ReflectionProbe as any).capturePixels(
+                    msg.nodePath,
+                    msg.timeoutMs,
+                    msg.componentUuid, msg.source,
+                );
+                updateRendererScene(result.sceneUrl);
+                reply({ result });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        socket.on('scene:list-reflection-probes', async (
+            msg: { sceneUrl?: string; source?: IReflectionProbeSceneIdentity },
+            reply: (response: { result?: unknown; error?: string }) => void,
+        ) => {
+            try {
+                const currentSceneUrl = await querySceneUrl().catch(() => '');
+                if (!msg?.sceneUrl || currentSceneUrl !== msg.sceneUrl) {
+                    throw new Error(
+                        `The WebGL scene renderer is not displaying the requested scene: ${msg?.sceneUrl || 'unknown'}.`,
+                    );
+                }
+                if (msg.source) { (DecoratorService.ReflectionProbe as any).assertSceneIdentity(msg.source); }
+                const source = await DecoratorService.ReflectionProbe.getSceneIdentity();
+                const probes = (DecoratorService.ReflectionProbe as any).listBakeableProbes();
+                reply({ result: { sceneUrl: currentSceneUrl, probes, source } });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        socket.on('scene:apply-reflection-probe', async (
+            msg: {
+                sceneUrl?: string;
+                nodePath?: string;
+                componentUuid?: string;
+                cubemapUuid?: string;
+                captureToken?: string;
+                source?: IReflectionProbeSceneIdentity;
+                saveScene?: boolean;
+                timeoutMs?: number;
+            },
+            reply: (response: { result?: unknown; error?: string }) => void,
+        ) => {
+            try {
+                if (!msg?.sceneUrl || !msg.nodePath || !msg.componentUuid || !msg.cubemapUuid || !msg.captureToken) {
+                    throw new Error('Invalid reflection-probe apply request.');
+                }
+                const result = await (DecoratorService.ReflectionProbe as any).applyBakedCubemap({
+                    sceneUrl: msg.sceneUrl,
+                    nodePath: msg.nodePath,
+                    componentUuid: msg.componentUuid,
+                    cubemapUuid: msg.cubemapUuid,
+                    captureToken: msg.captureToken,
+                    source: msg.source,
+                    saveScene: msg.saveScene !== false,
+                    timeoutMs: msg.timeoutMs,
+                    serverURL,
+                });
+                updateRendererScene(msg.sceneUrl);
+                reply({ result });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        socket.on('scene:save-reflection-probes', async (
+            msg: { sceneUrl?: string; source?: IReflectionProbeSceneIdentity },
+            reply: (response: { result?: unknown; error?: string }) => void,
+        ) => {
+            try {
+                const currentSceneUrl = await querySceneUrl().catch(() => '');
+                if (!msg?.sceneUrl || currentSceneUrl !== msg.sceneUrl) {
+                    throw new Error(
+                        `The WebGL scene renderer is not displaying the requested scene: ${msg?.sceneUrl || 'unknown'}.`,
+                    );
+                }
+                if (msg.source) { (DecoratorService.ReflectionProbe as any).assertSceneIdentity(msg.source); }
+                await DecoratorService.Editor.save({});
+                DecoratorService.Undo.markSaved();
+                updateRendererScene(currentSceneUrl);
+                reply({ result: { saved: true, sceneUrl: currentSceneUrl } });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        socket.on('scene:clear-reflection-probes', async (
+            msg: {
+                sceneUrl?: string;
+                source?: IReflectionProbeSceneIdentity;
+                saveScene?: boolean;
+                timeoutMs?: number;
+            },
+            reply: (response: { result?: unknown; error?: string }) => void,
+        ) => {
+            try {
+                if (!msg?.sceneUrl) {
+                    throw new Error('Invalid reflection-probe clear request.');
+                }
+                const result = await (DecoratorService.ReflectionProbe as any).clearBakedCubemaps({
+                    sceneUrl: msg.sceneUrl,
+                    source: msg.source,
+                    saveScene: msg.saveScene !== false,
+                    timeoutMs: msg.timeoutMs,
+                });
+                updateRendererScene(msg.sceneUrl);
+                reply({ result });
+            } catch (error) {
+                reply({ error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+        // Reconcile feature-local runtime state after first connection or reconnect.
+        // Reference images need this because their Sprite objects are not persisted with configuration.
+        socket.on('connect', () => {
+            invoke('Engine', 'syncDesignResolution', []);
+            invoke('ReferenceImage', 'syncFromAuthority', []);
+            // Join the renderer room immediately, then publish its scene once
+            // the editor service is ready.
+            socket.emit('scene-renderer:register', {
+                sceneUrl: rendererSceneUrl,
+                visible: rendererVisible,
+            });
+            void querySceneUrl().then((sceneUrl) => {
+                updateRendererScene(sceneUrl);
+            }).catch(() => {
+                // Registering without a scene still makes the renderer
+                // discoverable; capture will report a precise scene error.
+            });
+        });
+        const reportRendererScene = () => {
+            void querySceneUrl().then((sceneUrl) => {
+                updateRendererScene(sceneUrl);
+            }).catch(() => {
+                updateRendererScene('');
+            });
+        };
+        ServiceEvents.on('editor:open', reportRendererScene);
+        ServiceEvents.on('editor:reload', reportRendererScene);
+        ServiceEvents.on('editor:close', () => {
+            updateRendererScene('');
+        });
     } catch (e) {
         console.warn('[engine-bootstrap] setup browser-invoke channel failed:', e);
     }

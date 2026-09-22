@@ -1,4 +1,5 @@
 const mockAssetManager = {
+    copyAsset: jest.fn(),
     updateUserData: jest.fn(),
     updateUserDataByPath: jest.fn(),
     querySerializedData: jest.fn(),
@@ -8,11 +9,39 @@ const mockAssetManager = {
     queryMaterialEffect: jest.fn(),
     queryMaterial: jest.fn(),
     saveMaterial: jest.fn(),
+    queryAnimationGraph: jest.fn(),
+    queryAnimationGraphInspector: jest.fn(),
+    setAnimationGraphInspectorProperty: jest.fn(),
+    resetAnimationGraphInspectorProperty: jest.fn(),
+    createAnimationGraphInspectorProperty: jest.fn(),
+    executeAnimationGraphCommand: jest.fn(),
+    saveAnimationGraph: jest.fn(),
+    reloadAnimationGraph: jest.fn(),
+    onAnimationGraphChanged: jest.fn(),
+};
+
+const mockAssetDBManager = {
+    ready: true,
+    assetDBMap: {} as Record<string, { options: { target: string } }>,
+    assetDBInfo: {} as Record<string, unknown>,
+    addDB: jest.fn(),
+};
+
+const mockAssetConfig = {
+    data: {
+        assetDBList: [] as Array<{ name: string }>,
+    },
+    resolveBuiltinLocalizationMount: jest.fn(),
 };
 
 jest.mock('../../src/core/assets', () => ({
-    assetDBManager: {},
+    assetDBManager: mockAssetDBManager,
     assetManager: mockAssetManager,
+}));
+
+jest.mock('../../src/core/assets/asset-config', () => ({
+    __esModule: true,
+    default: mockAssetConfig,
 }));
 
 import * as Assets from '../../src/lib/assets/assets';
@@ -20,6 +49,10 @@ import * as Assets from '../../src/lib/assets/assets';
 describe('lib assets api', () => {
     afterEach(() => {
         jest.clearAllMocks();
+        mockAssetDBManager.ready = true;
+        mockAssetDBManager.assetDBMap = {};
+        mockAssetDBManager.assetDBInfo = {};
+        mockAssetConfig.data.assetDBList = [];
     });
 
     it('does not expose saveAssetMeta from the public lib API', () => {
@@ -28,6 +61,22 @@ describe('lib assets api', () => {
 
     it('does not expose updateAssetMetaUserData from the public lib API', () => {
         expect((Assets as { updateAssetMetaUserData?: unknown }).updateAssetMetaUserData).toBeUndefined();
+    });
+
+    it('copyAsset delegates resource and metadata copying to assetManager', async () => {
+        const copiedAsset = { uuid: 'copied-uuid', url: 'db://assets/copied.png' };
+        mockAssetManager.copyAsset.mockResolvedValue(copiedAsset);
+
+        await expect(Assets.copyAsset(
+            'db://assets/source.png',
+            'db://assets/copied.png',
+            { rename: true },
+        )).resolves.toBe(copiedAsset);
+        expect(mockAssetManager.copyAsset).toHaveBeenCalledWith(
+            'db://assets/source.png',
+            'db://assets/copied.png',
+            { rename: true },
+        );
     });
 
     it('updateAssetUserData delegates complete userData replacement to assetManager', async () => {
@@ -128,17 +177,117 @@ describe('lib assets api', () => {
         expect(mockAssetManager.saveMaterial).toHaveBeenCalledWith('material-uuid', materialDump);
     });
 
+    it('exposes animationGraph namespace and delegates document operations to assetManager', async () => {
+        const snapshot = {
+            uuid: 'graph-uuid',
+            url: 'db://assets/test.animgraph',
+            documentId: 'document-id',
+            revision: 0,
+            persistedRevision: 0,
+            dirty: false,
+            externallyModified: false,
+            graph: { layers: [], variables: [] },
+        };
+        const target = { kind: 'layer' as const, layerIndex: 0 };
+        const inspector = { ...snapshot, target, dump: { path: '', value: {} } };
+        const request = {
+            target,
+            path: 'weight',
+            patch: { value: 0.5 },
+            expected: { documentId: snapshot.documentId, revision: snapshot.revision },
+        };
+        const commandRequest = {
+            command: { type: 'add-layer' as const, name: 'Base' },
+            expected: request.expected,
+        };
+        const removeListener = jest.fn();
+        mockAssetManager.queryAnimationGraph.mockResolvedValue(snapshot);
+        mockAssetManager.queryAnimationGraphInspector.mockResolvedValue(inspector);
+        mockAssetManager.setAnimationGraphInspectorProperty.mockResolvedValue(inspector);
+        mockAssetManager.resetAnimationGraphInspectorProperty.mockResolvedValue(inspector);
+        mockAssetManager.createAnimationGraphInspectorProperty.mockResolvedValue(inspector);
+        mockAssetManager.executeAnimationGraphCommand.mockResolvedValue(snapshot);
+        mockAssetManager.saveAnimationGraph.mockResolvedValue(snapshot);
+        mockAssetManager.reloadAnimationGraph.mockResolvedValue(snapshot);
+        mockAssetManager.onAnimationGraphChanged.mockReturnValue(removeListener);
+
+        await expect(Assets.animationGraph.query('graph-uuid')).resolves.toBe(snapshot);
+        await expect(Assets.animationGraph.queryInspector('graph-uuid', target)).resolves.toBe(inspector);
+        await expect(Assets.animationGraph.setInspectorProperty('graph-uuid', request)).resolves.toBe(inspector);
+        await expect(Assets.animationGraph.resetInspectorProperty('graph-uuid', request)).resolves.toBe(inspector);
+        await expect(Assets.animationGraph.createInspectorProperty('graph-uuid', request)).resolves.toBe(inspector);
+        await expect(Assets.animationGraph.execute('graph-uuid', commandRequest)).resolves.toBe(snapshot);
+        await expect(Assets.animationGraph.save('graph-uuid', request.expected, 'inspector')).resolves.toBe(snapshot);
+        await expect(Assets.animationGraph.reload('graph-uuid', { expected: request.expected }, 'inspector')).resolves.toBe(snapshot);
+        expect(Assets.animationGraph.onChanged(jest.fn())).toBe(removeListener);
+
+        expect(mockAssetManager.queryAnimationGraph).toHaveBeenCalledWith('graph-uuid');
+        expect(mockAssetManager.queryAnimationGraphInspector).toHaveBeenCalledWith('graph-uuid', target);
+        expect(mockAssetManager.setAnimationGraphInspectorProperty).toHaveBeenCalledWith('graph-uuid', request);
+        expect(mockAssetManager.resetAnimationGraphInspectorProperty).toHaveBeenCalledWith('graph-uuid', request);
+        expect(mockAssetManager.createAnimationGraphInspectorProperty).toHaveBeenCalledWith('graph-uuid', request);
+        expect(mockAssetManager.executeAnimationGraphCommand).toHaveBeenCalledWith('graph-uuid', commandRequest);
+        expect(mockAssetManager.saveAnimationGraph).toHaveBeenCalledWith('graph-uuid', request.expected, 'inspector');
+        expect(mockAssetManager.reloadAnimationGraph).toHaveBeenCalledWith('graph-uuid', { expected: request.expected }, 'inspector');
+    });
+
     it('exposes queryPropertySchema and delegates to assetManager', async () => {
         const schema = {
             type: {
-                label: 'Import Type',
-                type: 'enum' as const,
+                title: 'Import Type',
+                type: 'string' as const,
                 default: 'sprite-frame',
+                enum: ['raw', 'sprite-frame'],
+                enumDescriptions: ['Raw', 'Sprite Frame'],
             },
         };
         mockAssetManager.queryPropertySchema.mockResolvedValue(schema);
 
         await expect(Assets.queryPropertySchema('image')).resolves.toEqual(schema);
         expect(mockAssetManager.queryPropertySchema).toHaveBeenCalledWith('image');
+    });
+
+    it('does not record a mount when AssetDB registration fails', async () => {
+        const canonical = {
+            name: 'localization-editor',
+            target: 'C:/builtin/static/assets',
+            readonly: true,
+            visible: true,
+            library: 'C:/project/library/localization-editor',
+        };
+        const reconcile = (Assets as {
+            reconcileLocalizationRuntimeMount: () => Promise<void>;
+        }).reconcileLocalizationRuntimeMount;
+
+        const addError = new Error('AssetDB start failed');
+        mockAssetConfig.resolveBuiltinLocalizationMount.mockReturnValue(canonical);
+        mockAssetDBManager.addDB.mockRejectedValue(addError);
+
+        await expect(reconcile()).rejects.toBe(addError);
+        expect(mockAssetConfig.data.assetDBList).toEqual([]);
+    });
+
+    it('rejects reconciliation before AssetDB readiness and on same-name target conflict', async () => {
+        const canonical = {
+            name: 'localization-editor',
+            target: 'C:/builtin/static/assets',
+            readonly: true,
+            visible: true,
+            library: 'C:/project/library/localization-editor',
+        };
+        mockAssetConfig.resolveBuiltinLocalizationMount.mockReturnValue(canonical);
+        const reconcile = (Assets as {
+            reconcileLocalizationRuntimeMount: () => Promise<void>;
+        }).reconcileLocalizationRuntimeMount;
+
+        mockAssetDBManager.ready = false;
+        await expect(reconcile()).rejects.toThrow('Asset database is not ready');
+        expect(mockAssetConfig.resolveBuiltinLocalizationMount).not.toHaveBeenCalled();
+
+        mockAssetDBManager.ready = true;
+        mockAssetDBManager.assetDBMap[canonical.name] = { options: { target: 'C:/other/static/assets' } };
+        await expect(reconcile()).rejects.toThrow('target conflict');
+        expect(mockAssetDBManager.addDB).not.toHaveBeenCalled();
+        expect(mockAssetConfig.data.assetDBList).toEqual([]);
     });
 });

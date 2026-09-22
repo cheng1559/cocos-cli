@@ -32,6 +32,18 @@ import {
     IPublicUIService,
     IUIService,
     IAnimationService,
+    IReflectionProbeService,
+    IPublicReflectionProbeService,
+    IPublicReferenceImageService,
+    IReferenceImageService,
+    IPublicLightProbeBakeService,
+    ILightProbeBakeService,
+    IPublicLightmapBakeService,
+    ILightmapBakeService,
+    IParticleService,
+    IPublicParticleService,
+    IPublicTerrainService,
+    ITerrainService,
 } from '../../common';
 
 /**
@@ -54,6 +66,12 @@ export interface IPublicServiceManager {
     SceneView: IPublicSceneViewService,
     Preview: IPublicPreviewService,
     UI: IPublicUIService,
+    ReflectionProbe: IPublicReflectionProbeService,
+    ReferenceImage: IPublicReferenceImageService,
+    LightProbeBake: IPublicLightProbeBakeService,
+    LightmapBake: IPublicLightmapBakeService,
+    Particle: IPublicParticleService,
+    Terrain: IPublicTerrainService,
 }
 
 export interface IServiceManager {
@@ -74,4 +92,10 @@ export interface IServiceManager {
     SceneView: ISceneViewService,
     Preview: IPreviewService,
     UI: IUIService,
+    ReflectionProbe: IReflectionProbeService,
+    ReferenceImage: IReferenceImageService,
+    LightProbeBake: ILightProbeBakeService,
+    LightmapBake: ILightmapBakeService,
+    Particle: IParticleService,
+    Terrain: ITerrainService,
 }

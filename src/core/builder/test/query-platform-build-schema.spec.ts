@@ -122,6 +122,10 @@ describe('PluginManager platform config schema queries', () => {
         (pm as any).configMap = {
             [TEST_PLATFORM]: {
                 [TEST_PLATFORM]: {
+                    supportPlatforms: {
+                        platforms: ['web-desktop', 'web-mobile'],
+                        controlledBy: 'enableWebBuild',
+                    },
                     options: {
                         mode: {
                             label: 'i18n:test.option.mode',
@@ -252,7 +256,7 @@ describe('PluginManager platform config schema queries', () => {
     it('returns common options and platform options for a platform', () => {
         const result = pm.getPlatformBuildSchema(TEST_PLATFORM);
 
-        // name 标记为 hidden -> 在源头过滤(配置系统 schema 无 hidden 字段)
+        // name 标记为 hidden -> 在源头整体删除(配置系统 schema 无 hidden 字段)
         expect(result.common.properties!.name).toBeUndefined();
         expect(result.common.properties!.mainBundleCompressionType).toMatchObject({
             title: 'Main Bundle Compression',
@@ -268,6 +272,12 @@ describe('PluginManager platform config schema queries', () => {
         });
         // 必填(verifyRules:['required'])-> hoist 进对象节点的 required(JSON Schema 对象级);
         // name 被 hidden 过滤,故 common 无 required
+        expect(result.supportPlatforms).toEqual({
+            platforms: ['web-desktop', 'web-mobile'],
+            controlledBy: 'enableWebBuild',
+        });
+        result.supportPlatforms!.platforms.push('android' as any);
+        expect((pm as any).configMap[TEST_PLATFORM][TEST_PLATFORM].supportPlatforms.platforms).toEqual(['web-desktop', 'web-mobile']);
         expect(result.platformOptions.required).toEqual(['mode']);
         expect(result.common.required).toBeUndefined();
     });

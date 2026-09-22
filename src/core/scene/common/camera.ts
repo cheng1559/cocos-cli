@@ -1,4 +1,4 @@
-import type { Vec3 } from 'cc';
+import type { Camera, Vec3 } from 'cc';
 import type { ICameraConfig, IOriginAxesConfig } from '../scene-configs';
 
 export type { ICameraConfig, IOriginAxesConfig };
@@ -23,9 +23,11 @@ export interface ICameraService {
     zoomReset(): void;
     alignNodeToSceneView(nodes: string[]): void;
     alignSceneViewToNode(nodes: string[]): void;
-    setGridColor(color: number[]): void;
+    setGridColor(color: number[], persist?: boolean): void;
     setOriginAxes2D(config: IOriginAxesConfig): void;
     setOriginAxes3D(config: IOriginAxesConfig): void;
+    /** Returns the editor camera when it has been created for the active Scene. */
+    getCamera(): Camera | undefined;
     onUpdate(deltaTime: number): void;
 }
 

@@ -1,6 +1,6 @@
 'use strict';
 
-import type { IAssetFileSystemProvider, IAssetRenameOptions, IAssetWriteFileOptions } from '@cocos/asset-db/libs/filesystem';
+import type { IAssetFileSystemProvider, IAssetRenameOptions, IAssetWriteFileOptions } from '@cocos/asset-db';
 import { copy as fsCopy, ensureDir, existsSync, move, outputFile, readFile as fsReadFile, remove } from 'fs-extra';
 import { dirname, join, relative } from 'path';
 import type { IMoveOptions } from '../@types/private';
@@ -97,7 +97,7 @@ export async function createDirectoryPath(path: string): Promise<void> {
     await Promise.resolve(provider.createDirectory!(path));
 }
 
-async function deletePath(path: string, options: DeleteAssetOptions = {}): Promise<void> {
+export async function deletePath(path: string, options: DeleteAssetOptions = {}): Promise<void> {
     await Promise.resolve(provider.delete!(path, options));
 }
 
@@ -143,8 +143,27 @@ export async function moveAssetSource(source: string, target: string, options?: 
 
     try {
         if (!Utils.Path.contains(source, target)) {
-            await renamePath(source + '.meta', target + '.meta', { overwrite: true });
-            await renamePath(source, target, renameOptions);
+            const originalMeta = !renameOptions.overwrite ? Buffer.from(await readPath(source + '.meta')) : undefined;
+            await renamePath(source + '.meta', target + '.meta', renameOptions);
+            try {
+                await renamePath(source, target, renameOptions);
+            } catch (error) {
+                // Keep the original UUID when a non-overwriting source move fails.
+                // Propagate failure before Asset DB refresh can generate a replacement meta.
+                if (originalMeta && existsSync(source)) {
+                    try {
+                        // A competing destination PNG does not own our metadata. Restore only
+                        // the exact bytes moved by this operation, never a replacement meta.
+                        if (existsSync(source + '.meta') || !Buffer.from(await readPath(target + '.meta')).equals(originalMeta)) {
+                            throw new Error('Asset metadata changed during the failed move; manual recovery is required.');
+                        }
+                        await renamePath(target + '.meta', source + '.meta', { overwrite: false });
+                    } catch (recoveryError) {
+                        throw new AggregateError([error, recoveryError], 'Asset move failed and original metadata could not be restored safely.');
+                    }
+                }
+                throw error;
+            }
             return;
         }
 
@@ -168,5 +187,6 @@ export async function moveAssetSource(source: string, target: string, options?: 
     } catch (error) {
         console.error(`asset db moveFile from ${source} -> ${target} fail!`);
         console.error(error);
+        if (!renameOptions.overwrite) throw error;
     }
 }
