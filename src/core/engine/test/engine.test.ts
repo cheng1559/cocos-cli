@@ -74,6 +74,23 @@ describe('Engine', () => {
         expect(config.macroConfig?.CUSTOM_PIPELINE_NAME).toBe('Builtin');
     });
 
+    it('getConfig should replace default arrays with project arrays', async () => {
+        const configInstance = Engine['_configInstance'];
+        const projectConfig = configInstance.getAll() as IEngineProjectConfig;
+        const selectedConfigKey = projectConfig.globalConfigKey || Object.keys(projectConfig.configs || {})[0];
+        const originalModules = [...projectConfig.configs![selectedConfigKey].includeModules];
+        const projectModules = ['base', 'spine-4.2'];
+
+        try {
+            await configInstance.set(`configs.${selectedConfigKey}.includeModules`, projectModules);
+
+            expect(Engine.getConfig().includeModules).toEqual(projectModules);
+            expect(Engine.getConfig().includeModules).not.toContain('spine-3.8');
+        } finally {
+            await configInstance.set(`configs.${selectedConfigKey}.includeModules`, originalModules);
+        }
+    });
+
     it('getConfig should normalize includeModules from graphics settings', async () => {
         const configInstance = Engine['_configInstance'];
         const projectConfig = configInstance.getAll() as Partial<IEngineProjectConfig> | undefined;
