@@ -133,7 +133,7 @@ export default async function initializePreviewToolbar() {
 
     devicePresets.forEach((preset) => deviceOptionList?.appendChild(createDeviceOption(preset, designResolution)));
     debugModeSelect.value = toolbarOptions.debugMode;
-    frameRateInput.value = '60';
+    frameRateInput.value = '300';
 
     const updateSelectedDevice = (deviceId) => {
         selectedDevice = deviceId;
@@ -283,7 +283,7 @@ export default async function initializePreviewToolbar() {
 
     frameRateInput.addEventListener('change', () => {
         const frameRate = Number.parseInt(frameRateInput.value, 10);
-        const value = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 60;
+        const value = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 300;
         frameRateInput.value = String(value);
         cc.game.setFrameRate(value);
     });
@@ -318,7 +318,7 @@ export default async function initializePreviewToolbar() {
     updateSelectedDevice(selectedDevice);
     applyDebugMode();
     setStatsVisible(!!toolbarOptions.showFps);
-    cc.game.setFrameRate(60);
+    cc.game.setFrameRate(300);
     applyWindowSize();
     updateFpsControl();
     updatePauseControls();

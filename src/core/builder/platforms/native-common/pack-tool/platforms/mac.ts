@@ -59,8 +59,7 @@ export default class MacPackTool extends MacOSPackTool {
     async make() {
         const nativePrjDir = this.paths.nativePrjDir;
 
-        const platform = this.isAppleSilicon() ? `-arch arm64` : `-arch x86_64`;
-        await toolHelper.runCmake(["--build", `"${nativePrjDir}"`, "--config", this.params.debug ? 'Debug' : 'Release', "--", "-quiet", platform]);
+        await toolHelper.runCmake(["--build", `"${nativePrjDir}"`, "--config", this.params.debug ? 'Debug' : 'Release', "--", "-quiet", "-arch arm64", "-arch x86_64"]);
         return true;
     }
 
