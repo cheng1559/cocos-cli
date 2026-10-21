@@ -93,6 +93,9 @@ export default async function gameBoot() {
         option.overrideSettings.launch = Object.assign({}, option.overrideSettings.launch, {
             launchScene: '',
         });
+        option.overrideSettings.screen = Object.assign({}, option.overrideSettings.screen, {
+            frameRate: 300,
+        });
         // 强制使用 WebGL 渲染（LegacyRenderMode.WEBGL = 2）。
         // 预览运行在 PREVIEW 模式（EDITOR=false），引擎 device-manager 在 AUTO 模式下
         // 会优先选 WebGPU（!EDITOR && supportWebGPU），而 dev-cli 引擎的 WebGPU 路径存在
