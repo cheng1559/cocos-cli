@@ -9,7 +9,7 @@ import { StatsQuery } from '@cocos/ccbuild';
 import { asserts } from '../utils/asserts';
 import { querySharedSettings, scriptConfig, SharedSettings } from '../shared/query-shared-settings';
 import { Logger } from '@cocos/creator-programming-common/lib/logger';
-import { QuickPack } from '@cocos/creator-programming-quick-pack/lib/quick-pack';
+import { QuickPack } from './quick-pack';
 import { QuickPackLoaderContext } from '@cocos/creator-programming-quick-pack/lib/loader';
 import {
     ModLo,
@@ -31,7 +31,8 @@ import { eventEmitter } from '../event-emitter';
 import { DBInfo } from '../@types/config-export';
 import path from 'path';
 
-const VERSION = '20';
+// Discard positional resolution caches corrupted by failed builds in the previous driver.
+const VERSION = '21';
 
 const featureUnitModulePrefix = 'cce:/internal/x/cc-fu/';
 
