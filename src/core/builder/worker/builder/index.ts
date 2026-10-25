@@ -207,6 +207,8 @@ export class BuildTask extends BuildTaskBase implements IBuilder {
 
             await this.runPluginTask(TaskManager.pluginTasks.onBeforeBuildAssets);
             await this.bundleManager.runPluginTask(this.bundleManager.hookMap.onBeforeBundleBuildTask);
+            // Match standalone Bundle builds: existing output files are not a valid asset cache.
+            this.bundleManager.clearBundleDest();
             // 开始执行构建任务
             await this.runBuildTask(TaskManager.getBuildTask('buildTasks'), this.taskManager.taskWeight);
             await this.bundleManager.runPluginTask(this.bundleManager.hookMap.onAfterBundleBuildTask);
