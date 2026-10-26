@@ -9,7 +9,7 @@ export class MakeCommand extends BaseCommand {
     register(): void {
         this.program
             .command('make')
-            .description('Make a Cocos native project')
+            .description('Make a Cocos native project (iOS device builds also generate an IPA)')
             .requiredOption('-p, --platform <platform>', 'Target platform (windows, android, ios, etc.)')
             .requiredOption('-d, --dest <path>', 'Destination path for the made project')
             .action(async (options: any) => {

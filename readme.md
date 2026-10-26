@@ -79,6 +79,8 @@ cocos --help
 
 For detailed command documentation, see [Commands Documentation](docs/en/commands.md).
 
+For an exported iOS project, `cocos make --platform ios --dest build/ios` compiles the selected targets and packages device builds as `build/ios/<executable>.ipa`. Without a developer team, device builds are unsigned and produce `<executable>-unsigned.ipa` for self-signing; a configured team preserves signing. Each IPA is accompanied by a `.ipa.sha256` checksum file. Simulator-only builds retain their `.app` output.
+
 ## 🖥️ Simulator Preview
 
 The simulator is not part of `npm run build` — `npm run release` builds it automatically, or you can build it directly:

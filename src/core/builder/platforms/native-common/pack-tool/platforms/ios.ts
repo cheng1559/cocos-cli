@@ -1,10 +1,15 @@
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import { createHash } from 'crypto';
+import { promisify } from 'util';
 import * as fs from 'fs-extra';
 import * as ps from 'path';
 import * as os from 'os';
 import { CocosParams } from '../base/default';
 import { cchelper, toolHelper } from '../utils';
 import { MacOSPackTool } from './mac-os';
+
+const runFile = promisify(execFile);
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
 export interface IOrientation {
     landscapeLeft: boolean;
@@ -17,7 +22,7 @@ export interface IOSParams {
     orientation: IOrientation;
     bundleId: string;
     skipUpdateXcodeProject: boolean;
-    teamid: string;
+    teamid?: string;
 
     iphoneos: boolean;
     simulator?: boolean;
@@ -129,39 +134,56 @@ export default class IOSPackTool extends MacOSPackTool {
 
     async make() {
         const options = this.params.platformParams;
-        if (options.iphoneos && !options.teamid) {
-            throw new Error('Error: Try to build iphoneos application but no developer team id was given!');
-        }
         const nativePrjDir = this.paths.nativePrjDir;
-        const simulatorArch = this.getIosSimulatorArch();
-        const projName = this.params.projectName;
-        // get xcode workspace
-        const regex = new RegExp(projName + '.xcworkspace$');
-        const files = fs.readdirSync(nativePrjDir);
-        const xcodeWorkSpace = files.find((file) => regex.test(file));
-        if (xcodeWorkSpace) {
-            const workspaceCompileParams = `-workspace ${nativePrjDir}/${xcodeWorkSpace} -scheme ALL_BUILD `
-                + `-parallelizeTargets -quiet -configuration ${this.params.debug ? 'Debug' : 'Release'} `
-                + `-hideShellScriptEnvironment -allowProvisioningUpdates SYMROOT=${nativePrjDir}`;
-            if (options.simulator) {
-                await toolHelper.runXcodeBuild([`-destination generic/platform='iOS Simulator'`,
-                    workspaceCompileParams, `CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO`]);
-            }
-            if (options.iphoneos) {
-                await toolHelper.runXcodeBuild([`-destination generic/platform='iOS'`,
-                    workspaceCompileParams, `DEVELOPMENT_TEAM=${options.teamid}`]);
-            }
+        const workspace = `${this.params.projectName}.xcworkspace`;
+        const projectArgs = fs.existsSync(ps.join(nativePrjDir, workspace))
+            ? ['-workspace', shellQuote(ps.join(nativePrjDir, workspace)), '-scheme', 'ALL_BUILD']
+            : ['-project', shellQuote(ps.join(nativePrjDir, `${this.params.projectName}.xcodeproj`)),
+                '-scheme', shellQuote(this.getExecutableNameOrDefault())];
+        const common = [...projectArgs, '-configuration', this.params.debug ? 'Debug' : 'Release',
+            '-parallelizeTargets', '-quiet', '-hideShellScriptEnvironment', `SYMROOT=${shellQuote(nativePrjDir)}`];
+        if (options.simulator) {
+            await toolHelper.runXcodeBuild([...common, '-sdk', 'iphonesimulator',
+                '-destination', shellQuote('generic/platform=iOS Simulator'), `ARCHS=${this.getIosSimulatorArch()}`,
+                'CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO']);
         }
-        else {
-            const projCompileParams = `--build "${nativePrjDir}" --config ${this.params.debug ? 'Debug' : 'Release'} -- -allowProvisioningUpdates -quiet`;
-            if (options.iphoneos) {
-                await toolHelper.runCmake([projCompileParams, '-sdk', 'iphoneos', `-arch arm64`]);
-            }
-            if (options.simulator) {
-                await toolHelper.runCmake([projCompileParams, '-sdk', 'iphonesimulator', `-arch ${simulatorArch}`]);
-            }
+        if (options.iphoneos) {
+            const signing = options.teamid
+                ? ['-allowProvisioningUpdates', `DEVELOPMENT_TEAM=${shellQuote(options.teamid)}`]
+                : ['CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO'];
+            await toolHelper.runXcodeBuild([...common, '-sdk', 'iphoneos', '-destination', 'generic/platform=iOS', ...signing]);
+            await this.packageIpa(!options.teamid);
         }
         return true;
+    }
+
+    private async packageIpa(unsigned: boolean): Promise<void> {
+        const name = this.getExecutableNameOrDefault();
+        const app = ps.join(this.paths.nativePrjDir, this.params.debug ? 'Debug-iphoneos' : 'Release-iphoneos', `${name}.app`);
+        const output = ps.join(this.paths.buildDir, `${name}${unsigned ? '-unsigned' : ''}.ipa`);
+        const staging = `${output}.tmp`;
+        const temporary = await fs.mkdtemp(ps.join(os.tmpdir(), 'cocos-ipa-'));
+        try {
+            const payload = ps.join(temporary, 'Payload');
+            const copy = ps.join(payload, `${name}.app`);
+            await fs.ensureDir(payload);
+            await runFile('ditto', [app, copy]);
+            if (unsigned) {
+                await runFile('codesign', ['--remove-signature', copy]);
+                await fs.remove(ps.join(copy, '_CodeSignature'));
+                await fs.remove(ps.join(copy, 'embedded.mobileprovision'));
+            }
+            await fs.remove(staging);
+            await runFile('ditto', ['-c', '-k', '--norsrc', '--keepParent', payload, staging]);
+            await runFile('unzip', ['-tq', staging]);
+            await fs.rename(staging, output);
+            const checksum = createHash('sha256').update(await fs.readFile(output)).digest('hex');
+            await fs.writeFile(`${output}.sha256`, `${checksum}  ${ps.basename(output)}\n`);
+            console.log(`IPA: ${output}`);
+        } finally {
+            await fs.remove(temporary);
+            await fs.remove(staging);
+        }
     }
 
     // ------------------- run ------------------ //
