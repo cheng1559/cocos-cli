@@ -7,7 +7,7 @@ import type { SceneApi } from '../api/scene/scene';
 import type { SystemApi } from '../api/system/system';
 import { SchemaProjectPath, SchemaPort, SchemaProjectType, TProjectPath, TPort, TProjectType } from './schema';
 import { param } from './decorator/decorator';
-import { SchemaPlatform, TPlatform, SchemaBuildOption, TBuildOption, SchemaPlatformCanMake, TPlatformCanMake, SchemaBuildDest, TBuildDest, SchemaUploadAccessToken, TUploadAccessToken } from './builder/schema';
+import { SchemaPlatform, TPlatform, SchemaBuildOption, TBuildOption, SchemaPlatformCanMake, TPlatformCanMake, SchemaBuildDest, TBuildDest, SchemaUploadAccessToken, TUploadAccessToken, SchemaDeveloperTeam, TDeveloperTeam } from './builder/schema';
 
 export class CocosAPI {
     public scene!: SceneApi;
@@ -93,9 +93,10 @@ export class CocosAPI {
      * @param platform 
      * @param dest 
      */
-    public static async makeProject(@param(SchemaPlatformCanMake) platform: TPlatformCanMake, @param(SchemaBuildDest) dest: TBuildDest) {
+    public static async makeProject(@param(SchemaPlatformCanMake) platform: TPlatformCanMake, @param(SchemaBuildDest) dest: TBuildDest,
+        @param(SchemaDeveloperTeam) developerTeam?: TDeveloperTeam) {
         const { default: Launcher } = await import('../core/launcher');
-        return await Launcher.make(platform, dest);
+        return await Launcher.make(platform, dest, developerTeam);
     }
 
     /**

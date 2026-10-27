@@ -233,13 +233,17 @@ export default class Launcher {
         return await build(platform, options);
     }
 
-    static async make(platform: Platform, dest: string) {
+    static async make(platform: Platform, dest: string, developerTeam?: string) {
+        if (developerTeam !== undefined && (platform !== 'ios' || !developerTeam.trim())) {
+            throw new Error('--developer-team requires a non-empty Apple Developer Team ID and --platform ios');
+        }
         GlobalConfig.mode = 'simple';
         const { init, executeBuildStageTask } = await import('./builder');
         await init([platform]);
         return await executeBuildStageTask('command make', 'make', {
             platform,
             dest,
+            ...(developerTeam === undefined ? {} : { packages: { ios: { developerTeam: developerTeam.trim() } } }),
         });
     }
 

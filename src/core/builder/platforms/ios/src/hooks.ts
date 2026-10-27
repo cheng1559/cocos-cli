@@ -1,7 +1,7 @@
 'use strict';
 
 import { IBuildResult, IIOSInternalBuildOptions } from './type';
-import { BuilderCache, IBuilder, InternalBuildResult, ISettingsDesignResolution } from '../../../@types/protected';
+import { BuilderCache, IBuilder, IBuildStageTask, InternalBuildResult, ISettingsDesignResolution } from '../../../@types/protected';
 import * as nativeCommonHook from '../../native-common/hooks';
 import { executableNameOrDefault } from './utils';
 import { ResolutionPolicy } from 'cc';
@@ -15,7 +15,11 @@ export const onBeforeBuild = nativeCommonHook.onBeforeBuild;
 export const onAfterBundleDataTask = nativeCommonHook.onAfterBundleDataTask;
 export const onAfterCompressSettings = nativeCommonHook.onAfterCompressSettings;
 export const onBeforeMake = nativeCommonHook.onBeforeMake;
-export const make = nativeCommonHook.make;
+export async function make(this: IBuildStageTask, root: string, options: IIOSInternalBuildOptions) {
+    const developerTeam = options.packages.ios.developerTeam;
+    if (developerTeam) options.cocosParams.platformParams.teamid = developerTeam.split('_')[0];
+    return nativeCommonHook.make.call(this, root, options);
+}
 export const run = nativeCommonHook.run;
 
 

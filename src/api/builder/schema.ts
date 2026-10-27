@@ -470,6 +470,9 @@ export type TBuildDest = z.infer<typeof SchemaBuildDest>;
 export const SchemaUploadAccessToken = z.string().min(1).optional().describe('Access token used by the target platform upload API'); // 平台上传 API 使用的 access token
 export type TUploadAccessToken = z.infer<typeof SchemaUploadAccessToken>;
 
+export const SchemaDeveloperTeam = z.string().min(1).optional().describe('Apple Developer Team ID for iOS signing');
+export type TDeveloperTeam = z.infer<typeof SchemaDeveloperTeam>;
+
 export const SchemaRunResult = z.string().describe('Run URL'); // 运行 URL
 export type TRunResult = z.infer<typeof SchemaRunResult>;
 
