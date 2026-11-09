@@ -1,0 +1,43 @@
+diff --git a/node_modules/@cocos/creator-programming-quick-pack/lib/quick-pack.js b/node_modules/@cocos/creator-programming-quick-pack/lib/quick-pack.js
+index ec48e4f..0a36076 100644
+--- a/node_modules/@cocos/creator-programming-quick-pack/lib/quick-pack.js
++++ b/node_modules/@cocos/creator-programming-quick-pack/lib/quick-pack.js
+@@ -140,28 +140,19 @@ class QuickPack {
+         for (let k in this._moduleRecords) {
+             const mr = this._moduleRecords[k];
+             if (mr && mr.resolutions) {
+-                const filteredResolutions = mr.resolutions.filter((res) => {
++                // `resolutions[i]` belongs to `imports[i]` (_link reads them by index), so a resolution to the failed
++                // file is cleared in place; filtering it out would shift every later import onto its neighbour's target.
++                // A cleared slot is resolved again on the next link.
++                mr.resolutions = mr.resolutions.map((res) => {
+                     const resolved = res === null || res === void 0 ? void 0 : res.resolved;
+-                    if (!resolved) {
+-                        return false; // filter
+-                    }
+-                    switch (resolved.type) {
+-                        case 'module':
+-                            if ((0, creator_programming_common_1.isCjsInteropUrl)(resolved.url)) {
+-                                if ((0, creator_programming_common_1.getCjsInteropTarget)(resolved.url).href === errFile) {
+-                                    return false; // filter
+-                                }
+-                                return true; // keep
+-                            }
+-                            if (resolved.url.href === errFile) {
+-                                return false; // filter
+-                            }
+-                            return true; // keep
+-                        default:
+-                            return true; // keep for default
++                    if (!resolved || resolved.type !== 'module') {
++                        return res;
+                     }
++                    const target = (0, creator_programming_common_1.isCjsInteropUrl)(resolved.url)
++                        ? (0, creator_programming_common_1.getCjsInteropTarget)(resolved.url).href
++                        : resolved.url.href;
++                    return target === errFile ? null : res;
+                 });
+-                mr.resolutions = filteredResolutions;
+             }
+         }
+     }
