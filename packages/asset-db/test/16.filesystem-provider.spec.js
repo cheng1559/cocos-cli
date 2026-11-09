@@ -302,6 +302,64 @@ describe('AssetDB 文件系统 Provider', () => {
         expect(fse.readFileSync(targetFile, 'utf8')).to.equal('source');
     });
 
+    it('copyToLibrary 遇到 Windows 瞬时文件锁错误时退避重试', async () => {
+        const calls = [];
+        let failures = 1;
+        const provider = {
+            async delete(filePath) {
+                calls.push('delete');
+                await fse.remove(filePath);
+            },
+            async copy(sourcePath, destinationPath) {
+                calls.push('copy');
+                // 预览服务器仍在发送旧文件时，同名复制会报 EBUSY
+                if (failures-- > 0) {
+                    throw Object.assign(new Error('EBUSY: resource busy or locked, copyfile'), { code: 'EBUSY' });
+                }
+                await fse.copy(sourcePath, destinationPath);
+            },
+        };
+
+        assetdb.setFileSystemProvider(provider);
+
+        const { asset } = createAsset();
+        const targetFile = `${asset.library}.copy`;
+
+        fse.outputFileSync(PATH.SOURCE, 'source');
+        fse.outputFileSync(targetFile, 'existing');
+
+        await asset.copyToLibrary('.copy', PATH.SOURCE);
+
+        // 第一次删掉旧文件后复制失败；重试时旧文件已不在，只需再复制一次
+        expect(calls).to.deep.equal(['delete', 'copy', 'copy']);
+        expect(fse.readFileSync(targetFile, 'utf8')).to.equal('source');
+    });
+
+    it('copyToLibrary 遇到非瞬时错误时不重试', async () => {
+        let copies = 0;
+        const provider = {
+            async copy() {
+                copies++;
+                throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+            },
+        };
+
+        assetdb.setFileSystemProvider(provider);
+
+        const { asset } = createAsset();
+        fse.outputFileSync(PATH.SOURCE, 'source');
+
+        let error;
+        try {
+            await asset.copyToLibrary('.copy', PATH.SOURCE);
+        } catch (caught) {
+            error = caught;
+        }
+
+        expect(error?.code).to.equal('ENOENT');
+        expect(copies).to.equal(1);
+    });
+
     it('fsCopy 使用本地 provider 时，未显式传 overwrite 也应保留默认覆盖语义', async () => {
         const sourcePath = path.join(PATH.ROOT, 'copy-default-source.txt');
         const targetPath = path.join(PATH.ROOT, 'copy-default-target.txt');

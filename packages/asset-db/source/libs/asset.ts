@@ -20,6 +20,36 @@ function isExtname(extOrFile) {
     return extOrFile === '' || extnameRex.test(extOrFile);
 }
 
+/** Windows 上瞬时的文件锁错误：共享冲突会报 UNKNOWN 或 EBUSY，挂起删除的文件会报 EPERM/EACCES。 */
+const TRANSIENT_FILE_ERRORS = new Set(['UNKNOWN', 'EBUSY', 'EPERM', 'EACCES']);
+const LIBRARY_COPY_ATTEMPTS = 8;
+
+/**
+ * 用源文件替换 library 中的导入文件，对 Windows 上的瞬时文件锁错误做有界退避重试。
+ *
+ * 预览服务器用 sendFile 把 library 文件发给浏览器时一直持有句柄，此时删除只会让文件进入挂起删除状态，
+ * 同名复制会失败；刚被重命名覆盖的源文件也可能被杀毒软件等短暂占用。两种情况都很快解除，
+ * 重试即可成功，否则导入失败后资源会一直停留在失败状态，只能重启进程。非瞬时错误直接抛出。
+ */
+async function replaceLibraryFile(source: string, file: string, context: IAssetOperationContext) {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            if (await fsExists(file)) {
+                await fsDelete(file, { context, useTrash: false });
+            }
+            await fsCopy(source, file, { context });
+            return;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (!code || !TRANSIENT_FILE_ERRORS.has(code) || attempt >= LIBRARY_COPY_ATTEMPTS) {
+                throw error;
+            }
+            // 指数退避：50ms、100ms、200ms……合计约 6 秒
+            await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** (attempt - 1)));
+        }
+    }
+}
+
 function createOperationContext(kind: IAssetOperationKind, source: string, paths: string[]): IAssetOperationContext {
     const timestamp = Date.now();
     return {
@@ -444,10 +474,7 @@ export class VirtualAsset {
                 this.meta.files.sort();
             }
             const context = createOperationContext('copy', this.source, [target, file]);
-            if (await fsExists(file)) {
-                await fsDelete(file, { context, useTrash: false });
-            }
-            await fsCopy(target, file, { context });
+            await replaceLibraryFile(target, file, context);
             return;
         }
 
@@ -461,10 +488,7 @@ export class VirtualAsset {
             this.meta.files.push(relativeFile);
             this.meta.files.sort();
         }
-        if (await fsExists(file)) {
-            await fsDelete(file, { context, useTrash: false });
-        }
-        await fsCopy(target, file, { context });
+        await replaceLibraryFile(target, file, context);
     }
 
     /**
