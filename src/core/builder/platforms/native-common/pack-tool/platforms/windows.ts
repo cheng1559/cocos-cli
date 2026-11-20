@@ -131,10 +131,15 @@ export default class WindowsPackTool extends NativePackTool {
         const executableDir = ps.join(this.paths.nativePrjDir, this.params.debug ? 'Debug' : 'Release');
         const targetFile = this.getExecutableNameOrDefault();
         const executableFile = ps.join(executableDir, targetFile + '.exe');
-        if (!executableFile || !fs.existsSync(executableFile)) {
-            throw new Error(`[windows run] '${targetFile}' is not found within ' + ${executableDir}!`);
+        if (fs.existsSync(executableFile)) {
+            return executableFile;
         }
-        return executableFile;
+        // The project may rename the executable with the CMake OUTPUT_NAME property.
+        const exes = fs.existsSync(executableDir) ? fs.readdirSync(executableDir).filter((x) => x.endsWith('.exe')) : [];
+        if (exes.length === 1) {
+            return ps.join(executableDir, exes[0]);
+        }
+        throw new Error(`[windows run] '${targetFile}' is not found within ' + ${executableDir}!`);
     }
 
     async run(): Promise<boolean> {

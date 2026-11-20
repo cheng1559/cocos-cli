@@ -26,10 +26,15 @@ export default class MacPackTool extends MacOSPackTool {
         const executableDir = ps.join(this.paths.nativePrjDir, this.params.debug ? 'Debug' : 'Release');
         const targetFile = this.getExecutableNameOrDefault();
         const executableFile = ps.join(executableDir, targetFile + '.app');
-        if (!executableFile || !fs.existsSync(executableFile)) {
-            throw new Error(`[mac run] '${targetFile}' is not found within ' + ${executableDir}!`);
+        if (fs.existsSync(executableFile)) {
+            return executableFile;
         }
-        return executableFile;
+        // The project may rename the bundle with the CMake OUTPUT_NAME property.
+        const apps = fs.existsSync(executableDir) ? fs.readdirSync(executableDir).filter((x) => x.endsWith('.app')) : [];
+        if (apps.length === 1) {
+            return ps.join(executableDir, apps[0]);
+        }
+        throw new Error(`[mac run] '${targetFile}' is not found within ' + ${executableDir}!`);
     }
 
     async generate() {
