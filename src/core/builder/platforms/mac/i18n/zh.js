@@ -10,6 +10,7 @@ module.exports = {
         package_name_hint: '请输入应用 ID, 如 com.example.demo',
         skipUpdateXcodeProject: '跳过 Xcode 工程的更新',
         targetVersionDefault: '默认值: 10.14',
+        archs: '支持的 CPU 架构',
         JobSystem: 'Job System',
         none: 'None',
     },
@@ -23,6 +24,7 @@ module.exports = {
         not_empty: '不能为空!',
         JobSystemTaskFlow: 'TaskFlow 需要 C++17 支持',
         JobSystemOther: '将使用 C++17(默认 C++14)支持编译',
+        archs: '设置可执行文件支持的 CPU 类型: arm64 用于苹果芯片, x86_64 用于 Intel, 两者都选则生成通用版本',
     },
     make: {
         label: '生成',
@@ -33,6 +35,7 @@ module.exports = {
     error: {
         m1_with_physic_x: '原生 PhysX 暂时不支持苹果 ARM 架构',
         targetVersionError: '版本号不合法, 示例: 10.14',
+        archsError: '请至少选择 arm64 和 x86_64 中的一项',
         packageNameRuleMessage:
             '包名仅支持包含字母数字字符(A-Z, a-z 和 0-9)、连字符(-)和句点(.), 通常使用反向 DNS 格式, 例如: com.cocos.name',
     },

@@ -11,6 +11,7 @@ module.exports = {
             'The package name, usually arranged in the reverse order of the product\'s website URL, such as: com.mycompany.myproduct.',
         skipUpdateXcodeProject: 'Skip the update of Xcode project',
         targetVersionDefault: 'Default: 10.14',
+        archs: 'Supported CPU Architectures',
         JobSystem: 'Job System',
         none: 'None',
     },
@@ -24,6 +25,7 @@ module.exports = {
         not_empty: 'Can not be empty!',
         JobSystemTaskFlow: 'TaskFlow will use C++17 to support compile',
         JobSystemOther: 'Will use C++17(default C++14) to support compile',
+        archs: 'Set the CPU types the executable is built for: arm64 for Apple silicon, x86_64 for Intel, or both for a universal one',
     },
     make: {
         label: 'Make',
@@ -34,6 +36,7 @@ module.exports = {
     error: {
         m1_with_physic_x: 'Native PhysX does not support Apple Silicon',
         targetVersionError: 'The version number is invalid, example: 10.14',
+        archsError: 'Select at least one of arm64 and x86_64',
         packageNameRuleMessage:
             'The bundle ID string must contain only alphanumeric characters (A-Z, a-z, and 0-9), hyphens (-), and periods (.). Typically, you use a reverse-DNS format for bundle ID strings.',
     },

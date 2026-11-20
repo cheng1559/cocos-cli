@@ -39,6 +39,11 @@ const config: IPlatformBuildPluginConfig = {
             },
             message: 'i18n:mac.error.targetVersionError',
         },
+        archs: {
+            func: (value: unknown) => Array.isArray(value) && value.length > 0
+                && value.every((arch) => arch === 'arm64' || arch === 'x86_64'),
+            message: 'i18n:mac.error.archsError',
+        },
         executableName: {
             func: (str) => {
                 // allow empty string
@@ -87,6 +92,15 @@ const config: IPlatformBuildPluginConfig = {
             description: 'Support Apple Silicon',
             default: false,
             type: 'boolean'
+        },
+        archs: {
+            label: 'i18n:mac.options.archs',
+            description: 'i18n:mac.tips.archs',
+            type: 'array',
+            items: { type: 'string' },
+            default: ['arm64', 'x86_64'],
+            verifyRules: ['archs'],
+            hidden: true,
         },
         skipUpdateXcodeProject: {
             label: 'i18n:mac.options.skipUpdateXcodeProject',

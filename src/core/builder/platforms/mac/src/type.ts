@@ -4,6 +4,7 @@ import { ICustomBuildScriptParam, IOptions as INativeOption } from '../../native
 
 
 export type IOrientation = 'landscape' | 'portrait';
+export type IMacArch = 'arm64' | 'x86_64';
 
 export type IOptions = INativeOption & {
     executableName: string;
@@ -14,6 +15,8 @@ export type IOptions = INativeOption & {
         gles2: boolean;
     },
     supportM1: boolean;
+    /** The architectures the executable is built for: both make a universal one. */
+    archs: IMacArch[];
     skipUpdateXcodeProject: boolean;
     targetVersion: string;
 }

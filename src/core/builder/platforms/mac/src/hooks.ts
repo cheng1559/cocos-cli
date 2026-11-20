@@ -28,6 +28,7 @@ export async function onAfterInit(this: IBuilder, options: IMacInternalBuildOpti
     params.cMakeConfig.CUSTOM_COPY_RESOURCE_HOOK = pkgOptions.skipUpdateXcodeProject;
     params.cMakeConfig.MACOSX_BUNDLE_GUI_IDENTIFIER = `set(MACOSX_BUNDLE_GUI_IDENTIFIER ${pkgOptions.packageName})`;
     params.platformParams.skipUpdateXcodeProject = pkgOptions.skipUpdateXcodeProject;
+    params.platformParams.archs = pkgOptions.archs;
     params.executableName = executableNameOrDefault(params.projectName, options.packages.mac.executableName);
     if (params.executableName === 'CocosGame') {
         console.warn(`The provided project name "${params.projectName}" is not suitable for use as an executable name. 'CocosGame' is applied instead.`);

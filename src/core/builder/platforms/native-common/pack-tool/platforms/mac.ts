@@ -8,6 +8,8 @@ import { MacOSPackTool } from "./mac-os";
 export interface IMacParams {
     bundleId: string;
     skipUpdateXcodeProject: boolean;
+    /** The architectures to build; both, the default, make a universal executable. */
+    archs?: string[];
 }
 
 export default class MacPackTool extends MacOSPackTool {
@@ -59,7 +61,8 @@ export default class MacPackTool extends MacOSPackTool {
     async make() {
         const nativePrjDir = this.paths.nativePrjDir;
 
-        await toolHelper.runCmake(["--build", `"${nativePrjDir}"`, "--config", this.params.debug ? 'Debug' : 'Release', "--", "-quiet", "-arch arm64", "-arch x86_64"]);
+        const archs = this.params.platformParams.archs?.length ? this.params.platformParams.archs : ['arm64', 'x86_64'];
+        await toolHelper.runCmake(["--build", `"${nativePrjDir}"`, "--config", this.params.debug ? 'Debug' : 'Release', "--", "-quiet", ...archs.map((arch) => `-arch ${arch}`)]);
         return true;
     }
 
