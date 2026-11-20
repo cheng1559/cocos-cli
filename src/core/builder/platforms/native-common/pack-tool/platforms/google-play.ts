@@ -73,10 +73,8 @@ export default class GooglePlayPackTool extends NativePackTool {
         } else {
             this.firstTimeBuild = false;
         }
-        // 原生工程不重复拷贝 TODO 复用前需要做版本检测
-        if (!fs.existsSync(this.paths.platformTemplateDirInPrj)) {
-            // 拷贝 lite 仓库的 templates/android/template 文件到构建输出目录
-            await fs.copy(ps.join(this.paths.nativeTemplateDirInCocos, this.params.platform, 'template'), this.paths.platformTemplateDirInPrj, { overwrite: false });
+        // 拷贝 lite 仓库的 templates/android/template 文件到构建输出目录
+        if (await this.fillTemplate(ps.join(this.paths.nativeTemplateDirInCocos, this.params.platform, 'template'), this.paths.platformTemplateDirInPrj)) {
             this.writeEngineVersion();
         } else {
             this.validateNativeDir();

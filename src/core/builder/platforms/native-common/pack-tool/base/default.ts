@@ -54,10 +54,19 @@ export default abstract class NativePackTool {
         return Number.isNaN(v) ? def : v;
     }
 
+    /**
+     * Copies an engine template into the project, adding only the files the project lacks: a project may keep just
+     * the files it changed, and take the rest from the engine, as a fresh clone of it does. Returns whether the
+     * project had no such folder before.
+     */
+    protected async fillTemplate(template: string, target: string): Promise<boolean> {
+        const created = !fs.existsSync(target);
+        await fs.copy(template, target, { overwrite: false });
+        return created;
+    }
+
     protected async copyCommonTemplate() {
-        if (!fs.existsSync(ps.join(this.paths.commonDirInPrj, 'CMakeLists.txt'))) {
-            await fs.copy(this.paths.commonDirInCocos, this.paths.commonDirInPrj, { overwrite: false });
-        }
+        await this.fillTemplate(this.paths.commonDirInCocos, this.paths.commonDirInPrj);
     }
 
     private get projEngineVersionPath() {
@@ -327,9 +336,8 @@ export default abstract class NativePackTool {
     }
 
     protected async copyPlatformTemplate() {
-        if (!fs.existsSync(this.paths.platformTemplateDirInPrj)) {
-            // 拷贝 templates/平台/ 文件到 "native" 目录
-            await fs.copy(ps.join(this.paths.nativeTemplateDirInCocos, this.params.platform), this.paths.platformTemplateDirInPrj, { overwrite: false });
+        // 拷贝 templates/平台/ 文件到 "native" 目录
+        if (await this.fillTemplate(ps.join(this.paths.nativeTemplateDirInCocos, this.params.platform), this.paths.platformTemplateDirInPrj)) {
             this.writeEngineVersion();
         } else {
             this.validateNativeDir();

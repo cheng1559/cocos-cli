@@ -14,12 +14,7 @@ export default class HuaweiAGCPackTool extends AndroidPackTool {
             );
         }
 
-        if (!fs.existsSync(this.paths.platformTemplateDirInPrj)) {
-            await fs.copy(
-                ps.join(this.paths.nativeTemplateDirInCocos, this.templatePlatform, 'template'),
-                this.paths.platformTemplateDirInPrj,
-                { overwrite: false },
-            );
+        if (await this.fillTemplate(ps.join(this.paths.nativeTemplateDirInCocos, this.templatePlatform, 'template'), this.paths.platformTemplateDirInPrj)) {
             this.writeEngineVersion();
         } else {
             this.validateNativeDir();

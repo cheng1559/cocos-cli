@@ -51,8 +51,7 @@ export default class AndroidPackTool extends NativePackTool {
      * templates/android/template 到根部，保证 native/engine/android/CMakeLists.txt 存在。
      */
     protected async copyPlatformTemplate() {
-        if (!fs.existsSync(this.paths.platformTemplateDirInPrj)) {
-            await fs.copy(ps.join(this.paths.nativeTemplateDirInCocos, 'android', 'template'), this.paths.platformTemplateDirInPrj, { overwrite: false });
+        if (await this.fillTemplate(ps.join(this.paths.nativeTemplateDirInCocos, 'android', 'template'), this.paths.platformTemplateDirInPrj)) {
             this.writeEngineVersion();
         } else {
             this.validateNativeDir();
